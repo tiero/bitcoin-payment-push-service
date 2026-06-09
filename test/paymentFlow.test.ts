@@ -139,6 +139,49 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
     expect(await manager.hasSwap("reverse-swap-1")).toBe(false);
   });
 
+  it("offline claimer: jumps straight to settled (never saw mempool) → still wakes once", async () => {
+    const ws = FakeWebSocket.instances[0]!;
+    const hash = "22".repeat(32);
+    const swap = mockReverseSwap("reverse-swap-offline", "swap.created", { preimageHash: hash });
+
+    await app.inject({
+      method: "POST",
+      url: "/register",
+      payload: { swap, topic: hash, label: "offline" },
+    });
+
+    // No claimable update is ever observed — an offline claimer finalized the
+    // receive and the swap reports settled directly.
+    await ws.emitUpdate("reverse-swap-offline", "invoice.settled");
+    await flush();
+
+    expect(notify).toHaveBeenCalledOnce();
+    const [, payload] = notify.mock.calls[0]! as [NotifyTarget, NotifyPayload];
+    expect(payload).toMatchObject({ title: "Payment received", memo: "offline" });
+
+    const list = await app.inject({ method: "GET", url: "/register" });
+    expect(list.json().registrations).toHaveLength(0);
+    expect(await manager.hasSwap("reverse-swap-offline")).toBe(false);
+  });
+
+  it("does not double-notify across mempool → settled", async () => {
+    const ws = FakeWebSocket.instances[0]!;
+    await app.inject({
+      method: "POST",
+      url: "/register",
+      payload: { swap: mockReverseSwap("reverse-swap-settle"), topic: "phone-topic" },
+    });
+
+    // Normal path: claimable wake prunes the swap, so the later settled update
+    // finds nothing to send.
+    await ws.emitUpdate("reverse-swap-settle", "transaction.mempool");
+    await flush();
+    await ws.emitUpdate("reverse-swap-settle", "invoice.settled");
+    await flush();
+
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
   it("does not notify on Boltz failure statuses", async () => {
     const ws = FakeWebSocket.instances[0]!;
     await app.inject({

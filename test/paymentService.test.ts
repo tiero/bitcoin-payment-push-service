@@ -120,16 +120,17 @@ describe("attachPaymentNotifications", () => {
     expect(removeSwap).toHaveBeenCalledWith("s1");
   });
 
-  it("prunes a swap that reached a terminal state without notifying (settled while down)", async () => {
+  it("wakes once on settled when the claimable window was never observed (offline claimer)", async () => {
     await start();
     registry.add({ swap: mockReverseSwap("s1"), topic: "t1" });
 
-    // We never saw the claimable window (e.g. process was down) and the next update
-    // we observe is already invoice.settled — nothing to notify, just stop tracking.
+    // We never saw the claimable window (e.g. an offline claimer finalized the
+    // receive, or the process was down) and the next update we observe is already
+    // invoice.settled — the receiver was still paid, so wake them, then prune.
     payments.onSwapUpdate(mockReverseSwap("s1", "invoice.settled"), "swap.created");
     await flush();
 
-    expect(notify).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledOnce();
     expect(registry.get("s1")).toBeUndefined();
     expect(removeSwap).toHaveBeenCalledWith("s1");
   });
