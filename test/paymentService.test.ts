@@ -55,7 +55,8 @@ describe("attachPaymentNotifications", () => {
     registry.add({
       swap: mockReverseSwap("s1", "swap.created", {
         preimageHash: hash,
-        invoiceAmount: 42_000,
+        invoiceAmount: 42_000, // gross, paid by the payer over Lightning
+        onchainAmount: 41_900, // net of Boltz fees, what the receiver claims
         description: "latte",
       }),
       topic: hash,
@@ -74,7 +75,7 @@ describe("attachPaymentNotifications", () => {
       body: "⚡ Lightning payment received (42k sats).",
       memo: "42k sats",
       preimage: "",
-      amtPaidSat: 42_000,
+      amtPaidSat: 41_900, // the receiver's net amount, not the 42_000 paid
       tags: ["zap", "moneybag"],
       priority: "high",
     });

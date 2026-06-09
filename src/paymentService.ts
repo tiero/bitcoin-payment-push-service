@@ -81,7 +81,11 @@ export async function attachPaymentNotifications(deps: PaymentServiceDeps): Prom
               priority: "high",
               memo: reg.label ?? swap.request?.description ?? "",
               preimage: swap.preimage ?? "",
-              amtPaidSat: swap.request?.invoiceAmount ?? swap.response?.onchainAmount ?? 0,
+              // What the receiver actually gets: `onchainAmount` is net of Boltz
+              // fees. `invoiceAmount` is what the *payer* paid over Lightning
+              // (larger by the fee), so it's only a last-resort fallback when the
+              // wallet registered a swap without the Boltz response.
+              amtPaidSat: swap.response?.onchainAmount ?? swap.request?.invoiceAmount ?? 0,
             },
           );
           // Delivered: stop watching and prune.

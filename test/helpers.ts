@@ -17,7 +17,10 @@ export const silentLogger = {
 export interface MockReverseSwapOptions {
   preimage?: string;
   preimageHash?: string;
+  /** What the payer pays over Lightning (gross). */
   invoiceAmount?: number;
+  /** What the receiver claims on-chain, net of Boltz fees. Defaults to invoiceAmount. */
+  onchainAmount?: number;
   description?: string;
 }
 
@@ -43,7 +46,7 @@ export function mockReverseSwap(
       id,
       invoice: "lnbc100n1ptest",
       lockupAddress: "ark1test",
-      onchainAmount: opts.invoiceAmount ?? 10_000,
+      onchainAmount: opts.onchainAmount ?? opts.invoiceAmount ?? 10_000,
       refundPublicKey: "0".repeat(66),
       timeoutBlockHeights: {
         refund: 100,

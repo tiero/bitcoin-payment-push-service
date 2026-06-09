@@ -103,7 +103,12 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
   it("end-to-end: register → Boltz funds (claimable) → one wake push → registry and manager pruned", async () => {
     const ws = FakeWebSocket.instances[0]!;
     const hash = "11".repeat(32);
-    const swap = mockReverseSwap("reverse-swap-1", "swap.created", { preimageHash: hash });
+    // Payer pays 1003 over Lightning; receiver claims 1000 on-chain after fees.
+    const swap = mockReverseSwap("reverse-swap-1", "swap.created", {
+      preimageHash: hash,
+      invoiceAmount: 1003,
+      onchainAmount: 1000,
+    });
 
     const res = await app.inject({
       method: "POST",
@@ -131,7 +136,8 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
       body: "⚡ Lightning payment received (1000 sats).",
       memo: "1000 sats",
       preimage: "",
-      amtPaidSat: 10_000,
+      // The amount the receiver got (net of Boltz fees), not the 1003 the payer paid.
+      amtPaidSat: 1000,
     });
 
     const list = await app.inject({ method: "GET", url: "/register" });
