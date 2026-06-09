@@ -27,7 +27,7 @@ describe("delivery reliability", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("keeps a settled swap registered after inline retries exhaust, then delivers on sweep", async () => {
+  it("keeps a claimable swap registered after inline retries exhaust, then delivers on sweep", async () => {
     dir = mkdtempSync(join(tmpdir(), "deliv-"));
 
     let calls = 0;
@@ -48,7 +48,7 @@ describe("delivery reliability", () => {
       deliveryAttempts: 1,
     });
 
-    registry.add({ swap: mockReverseSwap("s1", "invoice.settled"), topic: "t1" });
+    registry.add({ swap: mockReverseSwap("s1", "transaction.mempool"), topic: "t1" });
 
     await vi.waitFor(
       () => {

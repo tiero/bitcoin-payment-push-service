@@ -49,7 +49,7 @@ describe("attachPaymentNotifications", () => {
     });
   }
 
-  it("builds the settlement notify payload from the registration and swap", async () => {
+  it("builds the notify payload from the registration and swap on the claimable status", async () => {
     await start();
     const hash = "fe".repeat(32);
     registry.add({
@@ -62,7 +62,8 @@ describe("attachPaymentNotifications", () => {
       label: "42k sats",
     });
 
-    payments.onSwapUpdate(mockReverseSwap("s1", "invoice.settled"), "transaction.confirmed");
+    // transaction.mempool = Boltz funded the VTXO, not yet claimed → wake the phone.
+    payments.onSwapUpdate(mockReverseSwap("s1", "transaction.mempool"), "swap.created");
     await flush();
 
     expect(notify).toHaveBeenCalledOnce();
@@ -70,7 +71,7 @@ describe("attachPaymentNotifications", () => {
     expect(target).toEqual({ topic: hash });
     expect(payload).toMatchObject({
       title: "Payment received",
-      body: "⚡ Lightning payment settled (42k sats).",
+      body: "⚡ Lightning payment received (42k sats).",
       memo: "42k sats",
       preimage: "",
       amtPaidSat: 42_000,
@@ -98,8 +99,8 @@ describe("attachPaymentNotifications", () => {
       sweepIntervalMs: 3_600_000,
     });
 
-    registry.add({ swap: mockReverseSwap("s1", "invoice.settled"), topic: "t1" });
-    payments.onSwapUpdate(mockReverseSwap("s1", "invoice.settled"), "swap.created");
+    registry.add({ swap: mockReverseSwap("s1", "transaction.mempool"), topic: "t1" });
+    payments.onSwapUpdate(mockReverseSwap("s1", "transaction.mempool"), "swap.created");
 
     // Inline retries back off (500ms, 1s) between attempts.
     await vi.waitFor(() => expect(attempts).toBe(3), { timeout: 3000 });
@@ -119,10 +120,24 @@ describe("attachPaymentNotifications", () => {
     expect(removeSwap).toHaveBeenCalledWith("s1");
   });
 
+  it("prunes a swap that reached a terminal state without notifying (settled while down)", async () => {
+    await start();
+    registry.add({ swap: mockReverseSwap("s1"), topic: "t1" });
+
+    // We never saw the claimable window (e.g. process was down) and the next update
+    // we observe is already invoice.settled — nothing to notify, just stop tracking.
+    payments.onSwapUpdate(mockReverseSwap("s1", "invoice.settled"), "swap.created");
+    await flush();
+
+    expect(notify).not.toHaveBeenCalled();
+    expect(registry.get("s1")).toBeUndefined();
+    expect(removeSwap).toHaveBeenCalledWith("s1");
+  });
+
   it("ignores updates for swaps that were never registered", async () => {
     await start();
 
-    payments.onSwapUpdate(mockReverseSwap("unknown", "invoice.settled"), "swap.created");
+    payments.onSwapUpdate(mockReverseSwap("unknown", "transaction.mempool"), "swap.created");
     await flush();
 
     expect(notify).not.toHaveBeenCalled();
@@ -149,8 +164,10 @@ describe("attachPaymentNotifications", () => {
     });
 
     registry.add({ swap: mockReverseSwap("s1"), topic: "t1" });
-    payments.onSwapUpdate(mockReverseSwap("s1", "invoice.settled"), "swap.created");
-    payments.onSwapUpdate(mockReverseSwap("s1", "invoice.settled"), "invoice.settled");
+    // mempool then confirmed are both claimable; the in-flight guard must collapse
+    // them into a single send.
+    payments.onSwapUpdate(mockReverseSwap("s1", "transaction.mempool"), "swap.created");
+    payments.onSwapUpdate(mockReverseSwap("s1", "transaction.confirmed"), "transaction.mempool");
     await flush();
     expect(notify).toHaveBeenCalledTimes(1);
 

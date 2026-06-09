@@ -5,8 +5,11 @@ Bitcoin Lightning payment is received** in an [Arkade](https://docs.arkadeos.com
 
 Receiving Lightning in Arkade works via a **Boltz reverse submarine swap**: the
 wallet generates a BOLT11 invoice (a reverse swap identified by a `swapId`); when the
-payer pays, Boltz locks the funds and the swap progresses to **`invoice.settled`** —
-that's the "payment received" signal this service watches for.
+payer pays, Boltz funds/locks the VTXO (**`transaction.mempool`**, "claimable") and
+the phone then claims it. This service pushes at the *claimable* stage — Boltz has
+already been paid on Lightning, so the money is the user's; the push **wakes the
+wallet app** (phones can't run reliable background jobs) so it can finalize the
+claim. We push once, at claimable — not again on `invoice.settled`.
 
 It is built on the official Arkade packages — [`@arkade-os/sdk`](https://www.npmjs.com/package/@arkade-os/sdk)
 and [`@arkade-os/boltz-swap`](https://www.npmjs.com/package/@arkade-os/boltz-swap) —
@@ -19,7 +22,7 @@ the polling fallback, and the reconnect/backoff logic.
 ```
 wallet ──POST /register {swap, topic}──▶ service ── @arkade-os/boltz-swap SwapManager ──▶ Boltz
   (creates invoice via                      │          (one ws, swap.update, polling fallback)
-   ArkadeSwaps.createLightningInvoice)       │  onSwapUpdate → invoice.settled
+   ArkadeSwaps.createLightningInvoice)       │  onSwapUpdate → claimable (transaction.mempool)
                                              ▼
                                       ntfy.sh topic ──▶ 📱 your phone
 ```
@@ -39,7 +42,7 @@ wallet ──POST /register {swap, topic}──▶ service ── @arkade-os/bol
 | file | responsibility |
 |------|----------------|
 | `src/swapWatcher.ts` | builds the `@arkade-os/boltz-swap` `SwapManager` (monitor-only) |
-| `src/paymentService.ts` | wires `SwapManager` events → push on `invoice.settled` (via `isReverseSuccessStatus`) |
+| `src/paymentService.ts` | wires `SwapManager` events → push when claimable (via `isReverseClaimableStatus`); prunes on delivery/terminal |
 | `src/registry.ts` | persisted `swapId → {topic, swap}` map; resubscribed on restart |
 | `src/notifier/ntfyNotifier.ts` | `Notifier` implementation for ntfy.sh |
 | `src/server.ts` | HTTP API |
@@ -80,16 +83,18 @@ pnpm build && pnpm start
 
 ## Try it end-to-end
 
-1. Install the **ntfy** app on your phone and subscribe to a unique topic, e.g.
-   `arkade-demo-7f3a`.
+1. For local testing, install the **ntfy** app on your phone and subscribe to a unique
+   topic, e.g. `arkade-demo-7f3a` (ntfy needs no account/keys). The production provider
+   is [BlueWallet GroundControl](https://github.com/BlueWallet/GroundControl); set
+   exactly one of `NTFY_BASE_URL` / `GROUNDCONTROL_BASE_URL`.
 2. Start the service: `pnpm dev`.
-3. **Quick push smoke test** (no payment needed) — register a swap, then simulate the
-   settle event:
+3. **Quick push smoke test** (no payment needed) — register a swap, then simulate Boltz
+   funding it (`transaction.mempool`):
    ```bash
    curl -X POST localhost:3000/register -H 'content-type: application/json' \
      -d '{"topic":"arkade-demo-7f3a","swap":{"id":"demo","type":"reverse","status":"swap.created"}}'
    curl -X POST localhost:3000/simulate -H 'content-type: application/json' \
-     -d '{"swapId":"demo","status":"invoice.settled"}'
+     -d '{"swapId":"demo","status":"transaction.mempool"}'
    ```
    Your phone should buzz with "Payment received ⚡".
 4. **Full flow** against mutinynet — create a real invoice and pay it:
@@ -98,8 +103,8 @@ pnpm build && pnpm start
    ```
    The demo uses `ArkadeSwaps.createLightningInvoice` to mint a BOLT11 invoice, prints
    it, and registers the (preimage-redacted) pending swap. Pay the invoice from any
-   mutinynet Lightning wallet → `SwapManager` sees `invoice.settled` → push fires.
-   (Requires connectivity to the Arkade mutinynet server + Boltz.)
+   mutinynet Lightning wallet → `SwapManager` sees `transaction.mempool` (funded) →
+   push fires. (Requires connectivity to the Arkade mutinynet server + Boltz.)
 
 ## Tests
 
@@ -111,22 +116,23 @@ pnpm test
 - `test/paymentFlow.test.ts` — a **component test that drives the real
   `@arkade-os/boltz-swap` `SwapManager`** with a mocked `globalThis.WebSocket`,
   feeding mocked Boltz `swap.update` events through the whole pipeline: register →
-  subscribe → `transaction.mempool`/`confirmed` (no push) → `invoice.settled`
-  (exactly one push) → swap pruned. Also covers duplicate-settle de-duplication and
-  the `/simulate` path.
+  subscribe → `transaction.mempool` (exactly one push) → swap pruned. Also covers the
+  `mempool → confirmed` de-duplication, terminal/failure pruning, and the `/simulate`
+  path.
 - `test/deliveryRetry.test.ts` — proves a transient `notify` failure is **not**
-  lost: the reconciliation sweep redelivers a settled-but-undelivered swap and then
+  lost: the reconciliation sweep redelivers a claimable-but-undelivered swap and then
   prunes it.
 
 ## Reliability
 
-- **Never lose the one push.** Delivery is retried with backoff, and a periodic
-  reconciliation sweep re-attempts any swap that is settled but still registered —
-  so a transient ntfy outage (or settling while the process was down) is recovered,
-  not dropped. A synchronous in-flight guard prevents a re-entrant event from
-  double-sending.
-- **Bounded state.** A delivered or terminally-failed swap is pruned from both the
-  registry and the manager, so the persisted store stays small.
+- **Never lose the wake-up.** Delivery is retried with backoff, and a periodic
+  reconciliation sweep re-attempts any swap that is claimable but still registered —
+  so a transient push-provider outage (or becoming claimable while the process was
+  down) is recovered, not dropped. A synchronous in-flight guard prevents a
+  re-entrant event (`mempool → confirmed`) from double-sending.
+- **Bounded state.** A delivered swap, or one that reaches a terminal state
+  (settled/failed/expired) without us pushing, is pruned from both the registry and
+  the manager, so the persisted store stays small.
 - **Crash-safe persistence.** The registry writes to a temp file then `rename()`s,
   so a crash mid-write can't corrupt `registrations.json`.
 

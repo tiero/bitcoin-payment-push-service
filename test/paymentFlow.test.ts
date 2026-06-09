@@ -100,7 +100,7 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("end-to-end: register → Boltz settle → one push → registry and manager pruned", async () => {
+  it("end-to-end: register → Boltz funds (claimable) → one wake push → registry and manager pruned", async () => {
     const ws = FakeWebSocket.instances[0]!;
     const hash = "11".repeat(32);
     const swap = mockReverseSwap("reverse-swap-1", "swap.created", { preimageHash: hash });
@@ -115,12 +115,12 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
     expect(ws.subscribedIds()).toContain("reverse-swap-1");
     expect(await manager.hasSwap("reverse-swap-1")).toBe(true);
 
-    await ws.emitUpdate("reverse-swap-1", "transaction.mempool");
-    await ws.emitUpdate("reverse-swap-1", "transaction.confirmed");
+    // Nothing has been funded yet → no push.
     await flush();
     expect(notify).not.toHaveBeenCalled();
 
-    await ws.emitUpdate("reverse-swap-1", "invoice.settled");
+    // Boltz funds/locks the VTXO (claimable, not yet claimed) → wake the phone.
+    await ws.emitUpdate("reverse-swap-1", "transaction.mempool");
     await flush();
 
     expect(notify).toHaveBeenCalledOnce();
@@ -128,7 +128,7 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
     expect(target).toEqual({ topic: hash });
     expect(payload).toMatchObject({
       title: "Payment received",
-      body: "⚡ Lightning payment settled (1000 sats).",
+      body: "⚡ Lightning payment received (1000 sats).",
       memo: "1000 sats",
       preimage: "",
       amtPaidSat: 10_000,
@@ -197,7 +197,7 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
-  it("does not double-notify on a duplicate settled event", async () => {
+  it("does not double-notify across the mempool → confirmed transition", async () => {
     const ws = FakeWebSocket.instances[0]!;
     await app.inject({
       method: "POST",
@@ -205,9 +205,11 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
       payload: { swap: mockReverseSwap("reverse-swap-2"), topic: "phone-topic" },
     });
 
-    await ws.emitUpdate("reverse-swap-2", "invoice.settled");
+    // Both statuses are claimable; the first delivery prunes the swap so the second
+    // never reaches the handler.
+    await ws.emitUpdate("reverse-swap-2", "transaction.mempool");
     await flush();
-    await ws.emitUpdate("reverse-swap-2", "invoice.settled");
+    await ws.emitUpdate("reverse-swap-2", "transaction.confirmed");
     await flush();
 
     expect(notify).toHaveBeenCalledTimes(1);
