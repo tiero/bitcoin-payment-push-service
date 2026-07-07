@@ -21,6 +21,7 @@ export class GroundControlNotifier implements Notifier {
   ) {}
 
   async notify(target: NotifyTarget, payload: NotifyPayload): Promise<void> {
+    if (!target.topic) throw new Error("GroundControlNotifier requires target.topic (preimage hash)");
     const body: LightningInvoiceSettledNotification = {
       memo: payload.memo ?? payload.title,
       preimage: payload.preimage ?? "",

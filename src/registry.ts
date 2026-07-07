@@ -2,11 +2,17 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from "
 import { dirname } from "node:path";
 import type { BoltzReverseSwap, BoltzSwapStatus } from "@arkade-os/boltz-swap";
 import type { Logger } from "./logger.js";
+import type { WebPushSubscription } from "./notifier/types.js";
 
 export interface Registration {
   swapId: string;
-  /** ntfy topic, or preimage hash when using GroundControl. */
-  topic: string;
+  /**
+   * Delivery target for the string-addressed providers: ntfy topic, or preimage
+   * hash when using GroundControl. Absent for Web Push (see `subscription`).
+   */
+  topic?: string;
+  /** Web Push subscription, when the wallet/PWA registered one instead of a topic. */
+  subscription?: WebPushSubscription;
   label?: string;
   /**
    * The pending reverse swap as supplied by the wallet at registration time.
@@ -20,7 +26,8 @@ export interface Registration {
 }
 
 export interface RegisterInput {
-  topic: string;
+  topic?: string;
+  subscription?: WebPushSubscription;
   label?: string;
   swap: BoltzReverseSwap;
 }
@@ -71,6 +78,7 @@ export class Registry {
     const reg: Registration = {
       swapId,
       topic: input.topic,
+      subscription: input.subscription,
       label: input.label,
       swap: input.swap,
       createdAt: existing?.createdAt ?? now,

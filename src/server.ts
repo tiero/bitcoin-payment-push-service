@@ -21,11 +21,28 @@ const reverseSwapSchema = z
   })
   .passthrough();
 
-const registerSchema = z.object({
-  topic: z.string().min(1),
-  label: z.string().optional(),
-  swap: reverseSwapSchema,
+/** A W3C Push API subscription (`subscription.toJSON()`) for Web Push delivery. */
+const webPushSubscriptionSchema = z.object({
+  endpoint: z.string().url(),
+  expirationTime: z.number().nullable().optional(),
+  keys: z.object({
+    p256dh: z.string().min(1),
+    auth: z.string().min(1),
+  }),
 });
+
+// A registration must carry exactly one delivery target: a `topic` (ntfy /
+// GroundControl) or a Web Push `subscription`.
+const registerSchema = z
+  .object({
+    topic: z.string().min(1).optional(),
+    subscription: webPushSubscriptionSchema.optional(),
+    label: z.string().optional(),
+    swap: reverseSwapSchema,
+  })
+  .refine((d) => Boolean(d.topic) !== Boolean(d.subscription), {
+    message: "provide exactly one of `topic` or `subscription`",
+  });
 
 export interface ServerDeps {
   registry: Registry;
@@ -33,11 +50,20 @@ export interface ServerDeps {
   /** Inject a synthetic swap update through the same pipeline (for manual testing). */
   simulate: (swap: BoltzReverseSwap, oldStatus: BoltzSwapStatus) => void;
   logger: Logger;
+  /** VAPID public key, exposed at `GET /vapidPublicKey` so a PWA can subscribe. */
+  vapidPublicKey?: string;
 }
 
 export function buildServer(deps: ServerDeps) {
-  const { registry, manager, simulate, logger } = deps;
+  const { registry, manager, simulate, logger, vapidPublicKey } = deps;
   const app = Fastify({ loggerInstance: logger });
+
+  // A PWA fetches this to call `PushManager.subscribe({ applicationServerKey })`,
+  // then posts the resulting subscription to `/register`. 404 when Web Push is off.
+  app.get("/vapidPublicKey", (_request, reply) => {
+    if (!vapidPublicKey) return reply.code(404).send({ error: "web push not configured" });
+    return reply.send({ publicKey: vapidPublicKey });
+  });
 
   app.get("/health", async () => {
     const stats = await manager.getStats();
@@ -60,7 +86,12 @@ export function buildServer(deps: ServerDeps) {
     // Subscribe first: if the manager rejects, nothing is persisted, so the
     // registry never holds a swap that isn't actually being monitored.
     await manager.addSwap(swap);
-    const reg = registry.add({ swap, topic: parsed.data.topic, label: parsed.data.label });
+    const reg = registry.add({
+      swap,
+      topic: parsed.data.topic,
+      subscription: parsed.data.subscription,
+      label: parsed.data.label,
+    });
     return reply.code(201).send({ ok: true, registration: reg });
   });
 

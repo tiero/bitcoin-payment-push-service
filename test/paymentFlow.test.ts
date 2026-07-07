@@ -215,6 +215,53 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it("registers a Web Push subscription and wakes it with the subscription target", async () => {
+    const ws = FakeWebSocket.instances[0]!;
+    const subscription = {
+      endpoint: "https://push.example.com/xyz",
+      keys: { p256dh: "p256dh-key", auth: "auth-secret" },
+    };
+    const swap = mockReverseSwap("reverse-swap-webpush", "swap.created", { onchainAmount: 2500 });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/register",
+      payload: { swap, subscription, label: "pwa" },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().registration.subscription).toEqual(subscription);
+
+    await ws.emitUpdate("reverse-swap-webpush", "transaction.mempool");
+    await flush();
+
+    expect(notify).toHaveBeenCalledOnce();
+    const [target, payload] = notify.mock.calls[0]! as [NotifyTarget, NotifyPayload];
+    expect(target).toEqual({ topic: undefined, subscription });
+    expect(payload).toMatchObject({ title: "Payment received", amtPaidSat: 2500 });
+  });
+
+  it("rejects a registration that carries both a topic and a subscription", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/register",
+      payload: {
+        swap: mockReverseSwap("reverse-swap-both"),
+        topic: "t",
+        subscription: {
+          endpoint: "https://push.example.com/xyz",
+          keys: { p256dh: "k", auth: "a" },
+        },
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("GET /vapidPublicKey returns 404 when Web Push is not configured", async () => {
+    const res = await app.inject({ method: "GET", url: "/vapidPublicKey" });
+    expect(res.statusCode).toBe(404);
+  });
+
   it("DELETE /register/:swapId stops monitoring without notifying", async () => {
     await app.inject({
       method: "POST",
@@ -262,5 +309,26 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
     await flush();
 
     expect(notify).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("GET /vapidPublicKey", () => {
+  it("serves the configured VAPID public key so a PWA can subscribe", async () => {
+    // The endpoint only reads deps.vapidPublicKey, so the rest can be stubbed.
+    const app = buildServer({
+      registry: {} as never,
+      manager: {} as never,
+      simulate: () => {},
+      logger: silentLogger,
+      vapidPublicKey: "BTestPublicKey",
+    });
+    await app.ready();
+    try {
+      const res = await app.inject({ method: "GET", url: "/vapidPublicKey" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ publicKey: "BTestPublicKey" });
+    } finally {
+      await app.close();
+    }
   });
 });

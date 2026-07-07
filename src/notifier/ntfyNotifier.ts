@@ -21,6 +21,7 @@ export class NtfyNotifier implements Notifier {
   ) {}
 
   async notify(target: NotifyTarget, payload: NotifyPayload): Promise<void> {
+    if (!target.topic) throw new Error("NtfyNotifier requires target.topic");
     const url = `${this.baseUrl.replace(/\/$/, "")}/${encodeURIComponent(target.topic)}`;
     // HTTP header values are Latin-1; emit the (possibly UTF-8/emoji) title as raw
     // UTF-8 bytes mapped into a Latin-1 string. ntfy decodes header bytes as UTF-8.

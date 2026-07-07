@@ -24,18 +24,37 @@ const envSchema = z
   POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   NTFY_BASE_URL: z.string().url().optional(),
   GROUNDCONTROL_BASE_URL: z.string().url().optional(),
+  // Web Push (VAPID, RFC 8292). All three are required together to enable it.
+  // Generate a key pair with `pnpm gen:vapid`. The subject is a mailto:/https: URI.
+  VAPID_PUBLIC_KEY: z.string().optional(),
+  VAPID_PRIVATE_KEY: z.string().optional(),
+  VAPID_SUBJECT: z.string().optional(),
   DATA_FILE: z.string().default("./data/registrations.json"),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
   })
   .superRefine((data, ctx) => {
-    const hasNtfy = Boolean(data.NTFY_BASE_URL);
-    const hasGroundControl = Boolean(data.GROUNDCONTROL_BASE_URL);
-    if (hasNtfy === hasGroundControl) {
+    const vapidParts = [data.VAPID_PUBLIC_KEY, data.VAPID_PRIVATE_KEY, data.VAPID_SUBJECT].filter(
+      Boolean,
+    ).length;
+    if (vapidParts > 0 && vapidParts < 3) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Set exactly one of NTFY_BASE_URL or GROUNDCONTROL_BASE_URL",
+        message: "Web Push needs VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY and VAPID_SUBJECT together",
+      });
+    }
+
+    const providers = [
+      Boolean(data.NTFY_BASE_URL),
+      Boolean(data.GROUNDCONTROL_BASE_URL),
+      vapidParts === 3,
+    ].filter(Boolean).length;
+    if (providers !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Set exactly one push provider: NTFY_BASE_URL, GROUNDCONTROL_BASE_URL, or VAPID_* (Web Push)",
       });
     }
   });

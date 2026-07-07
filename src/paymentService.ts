@@ -73,7 +73,7 @@ export async function attachPaymentNotifications(deps: PaymentServiceDeps): Prom
           // `swap.request`/`response` may be absent: the /register schema accepts a
           // minimal swap ({ id, type, status }), so read these defensively.
           await notifier.notify(
-            { topic: reg.topic },
+            { topic: reg.topic, subscription: reg.subscription },
             {
               title: "Payment received",
               body: `⚡ Lightning payment received${suffix}.`,

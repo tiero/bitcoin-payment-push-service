@@ -33,9 +33,11 @@ wallet ──POST /register {swap, topic}──▶ service ── @arkade-os/bol
 - **Monitor-only.** The service runs `SwapManager` with `enableAutoActions: false`,
   so it needs **no wallet keys** — it only watches. The wallet keeps the preimage and
   claims the swap itself; the registered swap can have its `preimage` redacted.
-- **Push delivery:** pluggable `Notifier` interface; ships with
+- **Push delivery:** pluggable `Notifier` interface; ships with three providers —
   [`ntfy.sh`](https://ntfy.sh) (no account/keys — install the app, subscribe to a
-  topic). Swap in FCM / Expo / Web-Push later.
+  topic), [BlueWallet GroundControl](https://github.com/BlueWallet/GroundControl)
+  (FCM/APNS), and the **W3C Web Push API** for PWAs (VAPID-signed, delivered through
+  a service worker even with the tab closed). Swap in FCM / Expo directly later.
 
 ### Key modules
 
@@ -43,8 +45,9 @@ wallet ──POST /register {swap, topic}──▶ service ── @arkade-os/bol
 |------|----------------|
 | `src/swapWatcher.ts` | builds the `@arkade-os/boltz-swap` `SwapManager` (monitor-only) |
 | `src/paymentService.ts` | wires `SwapManager` events → push when claimable (via `isReverseClaimableStatus`); prunes on delivery/terminal |
-| `src/registry.ts` | persisted `swapId → {topic, swap}` map; resubscribed on restart |
+| `src/registry.ts` | persisted `swapId → {topic\|subscription, swap}` map; resubscribed on restart |
 | `src/notifier/ntfyNotifier.ts` | `Notifier` implementation for ntfy.sh |
+| `src/notifier/webPushNotifier.ts` | `Notifier` implementation for the W3C Web Push API (PWAs), signed with VAPID |
 | `src/server.ts` | HTTP API |
 | `scripts/demo-receive.ts` | wallet side: creates an invoice via `ArkadeSwaps` and registers it |
 
@@ -61,7 +64,12 @@ cp .env.example .env   # defaults target the Arkade mutinynet deployment
 | `BOLTZ_API_URL` | `https://api.boltz.mutinynet.arkade.sh` | Boltz REST base; ws is derived from it |
 | `ARK_SERVER_URL` | `https://mutinynet.arkade.sh` | Arkade server (demo script only) |
 | `PORT` | `3000` | HTTP port |
-| `NTFY_BASE_URL` | `https://ntfy.sh` | push provider base URL |
+| `NTFY_BASE_URL` | `https://ntfy.sh` | ntfy provider base URL |
+| `GROUNDCONTROL_BASE_URL` | — | GroundControl provider base URL |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | — | Web Push (VAPID) credentials; all three enable Web Push |
+
+Set **exactly one** provider: `NTFY_BASE_URL`, `GROUNDCONTROL_BASE_URL`, or the
+three `VAPID_*` vars. Generate a VAPID key pair with `pnpm gen:vapid`.
 
 ## Run
 
@@ -75,18 +83,19 @@ pnpm build && pnpm start
 
 | method | path | body | purpose |
 |--------|------|------|---------|
-| `POST` | `/register` | `{ swap, topic, label? }` | watch a reverse swap (`swap` = the `pendingSwap` from `createLightningInvoice`) |
+| `POST` | `/register` | `{ swap, topic \| subscription, label? }` | watch a reverse swap (`swap` = the `pendingSwap` from `createLightningInvoice`). Provide **exactly one** of `topic` (ntfy/GroundControl) or `subscription` (a Web Push `PushSubscription`) |
 | `GET` | `/register` | — | list registrations |
 | `DELETE` | `/register/:swapId` | — | stop watching |
 | `GET` | `/health` | — | status, ws connectivity, monitored count |
+| `GET` | `/vapidPublicKey` | — | the VAPID public key for a PWA to subscribe with (404 when Web Push isn't configured) |
 | `POST` | `/simulate` | `{ swapId, status }` | inject a status update for a registered swap (manual testing) |
 
 ## Try it end-to-end
 
 1. For local testing, install the **ntfy** app on your phone and subscribe to a unique
    topic, e.g. `arkade-demo-7f3a` (ntfy needs no account/keys). The production provider
-   is [BlueWallet GroundControl](https://github.com/BlueWallet/GroundControl); set
-   exactly one of `NTFY_BASE_URL` / `GROUNDCONTROL_BASE_URL`.
+   is [BlueWallet GroundControl](https://github.com/BlueWallet/GroundControl), or Web
+   Push for PWAs (see below); set exactly one provider.
 2. Start the service: `pnpm dev`.
 3. **Quick push smoke test** (no payment needed) — register a swap, then simulate Boltz
    funding it (`transaction.mempool`):
@@ -106,6 +115,44 @@ pnpm build && pnpm start
    mutinynet Lightning wallet → `SwapManager` sees `transaction.mempool` (funded) →
    push fires. (Requires connectivity to the Arkade mutinynet server + Boltz.)
 
+## Web Push (PWAs)
+
+To wake a **Progressive Web App** instead of a native app, use the Web Push
+provider. It signs each push with VAPID and encrypts the payload end-to-end; the
+browser delivers it to the PWA's service worker, which shows the notification —
+even when no tab is open.
+
+1. Generate a key pair and configure the service (comment `NTFY_BASE_URL` out):
+   ```bash
+   pnpm gen:vapid   # prints VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT
+   ```
+2. In the PWA, register a service worker, fetch the public key, and subscribe. Then
+   register that subscription per invoice — with the same `swap` you'd pass otherwise:
+   ```js
+   const { publicKey } = await (await fetch("/vapidPublicKey")).json();
+   const reg = await navigator.serviceWorker.register("/sw.js");
+   const subscription = await reg.pushManager.subscribe({
+     userVisibleOnly: true,
+     applicationServerKey: publicKey, // base64url; convert to Uint8Array if your browser needs it
+   });
+   await fetch("/register", {
+     method: "POST",
+     headers: { "content-type": "application/json" },
+     body: JSON.stringify({ swap, subscription, label: "1000 sats" }),
+   });
+   ```
+3. The service worker turns the pushed JSON (`{ title, body, amtPaidSat, ... }`) into
+   a notification:
+   ```js
+   self.addEventListener("push", (event) => {
+     const data = event.data.json();
+     event.waitUntil(self.registration.showNotification(data.title, { body: data.body }));
+   });
+   ```
+
+When Boltz funds the swap, the service pushes to the subscription's endpoint and the
+PWA buzzes — same claimable-stage wake-up as the other providers.
+
 ## Tests
 
 ```bash
@@ -122,6 +169,10 @@ pnpm test
 - `test/deliveryRetry.test.ts` — proves a transient `notify` failure is **not**
   lost: the reconciliation sweep redelivers a claimable-but-undelivered swap and then
   prunes it.
+- `test/webPushNotifier.test.ts` — the Web Push notifier: VAPID setup, JSON payload,
+  priority→urgency mapping, and mapping a `410 Gone` from the push service to an error.
+  `test/paymentFlow.test.ts` also covers registering a `subscription`, the
+  topic/subscription mutual exclusion, and `GET /vapidPublicKey`.
 
 ## Reliability
 
@@ -140,7 +191,7 @@ pnpm test
 
 - Because monitoring needs no keys, the wallet can **redact the `preimage`** before
   registering — the secret never leaves the wallet. The demo does this.
-- Add an `FcmNotifier` / `ExpoNotifier` / Web-Push behind the `Notifier` interface
-  without touching the monitor.
+- ntfy, GroundControl and Web Push all sit behind the same `Notifier` interface; an
+  `FcmNotifier` / `ExpoNotifier` can be added the same way, without touching the monitor.
 - For a non-Boltz / wallet-wide path, the same idea maps onto the arkd indexer stream
   (`@arkade-os/sdk` `waitForIncomingFunds` / `SubscribeForScripts`); out of scope here.
