@@ -1,12 +1,20 @@
 import { config } from "./config.js";
 import { logger } from "./logger.js";
-import { Registry } from "./registry.js";
+import { createStore } from "./store/index.js";
 import { createSwapWatcher } from "./swapWatcher.js";
 import { createNotifier } from "./notifierFactory.js";
 import { attachPaymentNotifications } from "./paymentService.js";
+import { WebSocket } from "ws";
 
 async function main(): Promise<void> {
-  const registry = new Registry(config.DATA_FILE, logger);
+  // Boltz's SwapManager uses the global WebSocket, which Node < 22 lacks. Wire in
+  // the `ws` implementation so real-time monitoring works on Node 20 too; without
+  // it the manager silently degrades to slower polling.
+  if (typeof globalThis.WebSocket === "undefined") {
+    (globalThis as Record<string, unknown>).WebSocket = WebSocket;
+  }
+
+  const registry = createStore(config, logger);
   registry.load();
 
   const manager = createSwapWatcher(
@@ -32,6 +40,7 @@ async function main(): Promise<void> {
     payments.stop();
     await manager.stop();
     await app.close();
+    registry.close();
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));

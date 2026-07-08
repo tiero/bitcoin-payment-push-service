@@ -24,18 +24,25 @@ const envSchema = z
   POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   NTFY_BASE_URL: z.string().url().optional(),
   GROUNDCONTROL_BASE_URL: z.string().url().optional(),
+  EXPO_ENABLED: z.enum(["true", "false"]).optional(),
+  EXPO_ACCESS_TOKEN: z.string().optional(),
   DATA_FILE: z.string().default("./data/registrations.json"),
+  STORAGE_BACKEND: z.enum(["json", "sqlite"]).default("json"),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),
   })
   .superRefine((data, ctx) => {
-    const hasNtfy = Boolean(data.NTFY_BASE_URL);
-    const hasGroundControl = Boolean(data.GROUNDCONTROL_BASE_URL);
-    if (hasNtfy === hasGroundControl) {
+    const enabled = [
+      Boolean(data.NTFY_BASE_URL),
+      Boolean(data.GROUNDCONTROL_BASE_URL),
+      data.EXPO_ENABLED === "true",
+    ].filter(Boolean).length;
+    if (enabled !== 1) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Set exactly one of NTFY_BASE_URL or GROUNDCONTROL_BASE_URL",
+        message:
+          "Set exactly one push provider: NTFY_BASE_URL, GROUNDCONTROL_BASE_URL, or EXPO_ENABLED=true",
       });
     }
   });

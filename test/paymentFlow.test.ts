@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SwapManagerClient } from "@arkade-os/boltz-swap";
-import { Registry } from "../src/registry.js";
+import { JsonStore } from "../src/store/index.js";
 import { createSwapWatcher } from "../src/swapWatcher.js";
 import { attachPaymentNotifications, type PaymentService } from "../src/paymentService.js";
 import { buildServer } from "../src/server.js";
@@ -70,7 +70,7 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
     notify = vi.fn(async () => {});
     notifier = { notify } as unknown as Notifier;
 
-    const registry = new Registry(join(dir, "reg.json"), silentLogger);
+    const registry = new JsonStore(join(dir, "reg.json"), silentLogger);
     registry.load();
     manager = createSwapWatcher(
       { network: "mutinynet", apiUrl: "https://api.boltz.mutinynet.arkade.sh", pollIntervalMs: 600_000 },

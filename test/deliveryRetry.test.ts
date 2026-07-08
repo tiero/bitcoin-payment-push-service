@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SwapManagerClient } from "@arkade-os/boltz-swap";
-import { Registry } from "../src/registry.js";
+import { JsonStore } from "../src/store/index.js";
 import { attachPaymentNotifications, type PaymentService } from "../src/paymentService.js";
 import type { Notifier } from "../src/notifier/types.js";
 import { mockReverseSwap, silentLogger } from "./helpers.js";
@@ -38,7 +38,7 @@ describe("delivery reliability", () => {
     const notifier = { notify } as unknown as Notifier;
 
     const removed = vi.fn(async () => {});
-    const registry = new Registry(join(dir, "reg.json"), silentLogger);
+    const registry = new JsonStore(join(dir, "reg.json"), silentLogger);
     payments = await attachPaymentNotifications({
       manager: fakeManager(removed),
       registry,
