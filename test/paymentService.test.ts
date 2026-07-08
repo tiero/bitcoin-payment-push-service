@@ -11,7 +11,7 @@ import {
   type NotifyPayload,
   type NotifyTarget,
 } from "../src/notifier/types.js";
-import { flush, mockReverseSwap, silentLogger } from "./helpers.js";
+import { flush, mockPushSubscription, mockReverseSwap, silentLogger } from "./helpers.js";
 
 function fakeManager(removeSwap = vi.fn(async () => {})): SwapManagerClient {
   return {
@@ -132,12 +132,49 @@ describe("attachPaymentNotifications", () => {
       sweepIntervalMs: 3_600_000,
     });
 
-    registry.add({ swap: mockReverseSwap("s1"), target: { kind: "topic", topic: "stale" } });
+    registry.add({
+      swap: mockReverseSwap("s1"),
+      target: { kind: "webpush", subscription: mockPushSubscription() },
+    });
     payments.onSwapUpdate(mockReverseSwap("s1", "transaction.mempool"), "swap.created");
     await flush();
 
     // No inline retries (would be 3 for a transient error) and no sweep re-attempt:
     // the registration is gone.
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(registry.get("s1")).toBeUndefined();
+    expect(removeSwap).toHaveBeenCalledWith("s1");
+  });
+
+  it("gives up on a persistently failing delivery once it ages past the retention window", async () => {
+    dir = mkdtempSync(join(tmpdir(), "pay-"));
+    registry = new Registry(join(dir, "reg.json"), silentLogger);
+    removeSwap = vi.fn(async () => {});
+    // Never classified as permanent (e.g. a persistent ntfy 4xx), never succeeds.
+    notify = vi.fn(async () => {
+      throw new Error("persistent transient-looking failure");
+    });
+    notifier = { targetKind: "topic", notify } as unknown as Notifier;
+    payments = await attachPaymentNotifications({
+      manager: fakeManager(removeSwap),
+      registry,
+      notifier,
+      logger: silentLogger,
+      deliveryAttempts: 1,
+      sweepIntervalMs: 3_600_000,
+      maxDeliveryAgeMs: 1_000,
+    });
+
+    const reg = registry.add({
+      swap: mockReverseSwap("s1", "transaction.mempool"),
+      target: { kind: "topic", topic: "t1" },
+    });
+    // Old failing registration (same status → markStatus keeps updatedAt).
+    reg.updatedAt = Date.now() - 5_000;
+    payments.onSwapUpdate(mockReverseSwap("s1", "transaction.mempool"), "transaction.mempool");
+    await flush();
+
+    // One last attempt is made, then the registration is pruned, not re-swept.
     expect(notify).toHaveBeenCalledTimes(1);
     expect(registry.get("s1")).toBeUndefined();
     expect(removeSwap).toHaveBeenCalledWith("s1");

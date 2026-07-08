@@ -84,18 +84,20 @@ describe("WebPushNotifier", () => {
     expect(sendNotification).not.toHaveBeenCalled();
   });
 
-  it("maps 410 Gone (and 404) to PermanentDeliveryError so the caller prunes", async () => {
-    sendNotification.mockRejectedValueOnce(new MockWebPushError("Gone", 410, "unsubscribed"));
+  it("maps gone subscriptions (404/410) and VAPID auth rejections (401/403) to PermanentDeliveryError", async () => {
     const notifier = new WebPushNotifier(VAPID, silentLogger);
 
-    await expect(notifier.notify(target, { title: "t", body: "b" })).rejects.toThrow(
-      PermanentDeliveryError,
-    );
-
-    sendNotification.mockRejectedValueOnce(new MockWebPushError("Not Found", 404));
-    await expect(notifier.notify(target, { title: "t", body: "b" })).rejects.toThrow(
-      PermanentDeliveryError,
-    );
+    for (const [status, text] of [
+      [410, "unsubscribed"],
+      [404, "not found"],
+      [403, "VapidPkHashMismatch"],
+      [401, "unauthorized"],
+    ] as const) {
+      sendNotification.mockRejectedValueOnce(new MockWebPushError("rejected", status, text));
+      await expect(notifier.notify(target, { title: "t", body: "b" })).rejects.toThrow(
+        PermanentDeliveryError,
+      );
+    }
   });
 
   it("surfaces other push-service rejections as plain (retryable) errors", async () => {

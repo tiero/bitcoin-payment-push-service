@@ -19,6 +19,13 @@ export interface PaymentServiceDeps {
   sweepIntervalMs?: number;
   /** Delivery attempts before leaving the swap for the next sweep. Default 3. */
   deliveryAttempts?: number;
+  /**
+   * How long (since the swap's last status change) delivery keeps failing before
+   * the registration is pruned instead of re-swept — bounds retries against a
+   * target that fails persistently without ever being classified as permanent.
+   * Default 24h.
+   */
+  maxDeliveryAgeMs?: number;
 }
 
 export interface PaymentService {
@@ -30,6 +37,7 @@ export interface PaymentService {
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 const DEFAULT_DELIVERY_ATTEMPTS = 3;
+const DEFAULT_MAX_DELIVERY_AGE_MS = 24 * 60 * 60 * 1000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -58,9 +66,20 @@ export async function attachPaymentNotifications(deps: PaymentServiceDeps): Prom
   const { manager, registry, notifier, logger } = deps;
   const sweepIntervalMs = deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
   const deliveryAttempts = deps.deliveryAttempts ?? DEFAULT_DELIVERY_ATTEMPTS;
+  const maxDeliveryAgeMs = deps.maxDeliveryAgeMs ?? DEFAULT_MAX_DELIVERY_AGE_MS;
 
   // Swaps with a delivery currently in progress — guards against double-send.
   const inFlight = new Set<string>();
+
+  // Stop watching a swap. removeSwap is best-effort: the registry is the source
+  // of truth for resubscription, and deliver() is invoked as `void deliver(...)`,
+  // so a manager error here must not become an unhandled rejection.
+  const prune = async (swapId: string): Promise<void> => {
+    registry.remove(swapId);
+    await manager
+      .removeSwap(swapId)
+      .catch((err) => logger.warn({ err, swapId }, "manager.removeSwap failed"));
+  };
 
   const deliver = async (reg: Registration): Promise<void> => {
     if (inFlight.has(reg.swapId)) return;
@@ -86,26 +105,37 @@ export async function attachPaymentNotifications(deps: PaymentServiceDeps): Prom
             // wallet registered a swap without the Boltz response.
             amtPaidSat: swap.response?.onchainAmount ?? swap.request?.invoiceAmount ?? 0,
           });
-          // Delivered: stop watching and prune.
-          registry.remove(reg.swapId);
-          await manager.removeSwap(reg.swapId);
+          // Delivered: stop watching and prune. (prune swallows a removeSwap
+          // error — retrying the loop here would re-notify an already-woken phone.)
+          await prune(reg.swapId);
           return;
         } catch (err) {
           // The target itself is dead (expired/unsubscribed Web Push subscription,
-          // or a kind the provider can't address) — retrying can never succeed, so
-          // prune instead of leaving it for the sweep to hammer forever.
+          // revoked VAPID authorization) — retrying can never succeed, so prune
+          // instead of leaving it for the sweep to hammer forever.
           if (err instanceof PermanentDeliveryError) {
             logger.error(
               { err, swapId: reg.swapId },
               "delivery target permanently unusable; pruning registration",
             );
-            registry.remove(reg.swapId);
-            await manager.removeSwap(reg.swapId);
+            await prune(reg.swapId);
             return;
           }
           lastErr = err;
           if (attempt < deliveryAttempts - 1) await sleep(500 * 2 ** attempt);
         }
+      }
+      // Providers can't always classify a failure as permanent (a persistent ntfy
+      // 4xx, a misconfigured base URL): give a failing registration a full
+      // retention window of sweep retries since its last status change, then stop —
+      // otherwise a settled swap whose status never changes again retries forever.
+      if (Date.now() - reg.updatedAt > maxDeliveryAgeMs) {
+        logger.error(
+          { err: lastErr, swapId: reg.swapId, maxDeliveryAgeMs },
+          "delivery kept failing past the retention window; giving up and pruning",
+        );
+        await prune(reg.swapId);
+        return;
       }
       // Left registered & claimable — the sweep will retry it later.
       logger.error(
@@ -134,8 +164,7 @@ export async function attachPaymentNotifications(deps: PaymentServiceDeps): Prom
     // Failed terminal (expired/refunded) → nothing to notify, just stop tracking it.
     if (isReverseFinalStatus(swap.status)) {
       logger.info({ swapId: swap.id, status: swap.status }, "reverse swap failed; pruning");
-      registry.remove(swap.id);
-      void manager.removeSwap(swap.id);
+      void prune(swap.id);
     }
   };
 
@@ -148,8 +177,7 @@ export async function attachPaymentNotifications(deps: PaymentServiceDeps): Prom
       if (isReverseClaimableStatus(reg.swap.status) || isReverseSuccessStatus(reg.swap.status)) {
         if (!inFlight.has(reg.swapId)) void deliver(reg);
       } else if (isReverseFinalStatus(reg.swap.status)) {
-        registry.remove(reg.swapId);
-        void manager.removeSwap(reg.swapId);
+        void prune(reg.swapId);
       }
     }
   };

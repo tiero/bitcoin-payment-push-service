@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import { z } from "zod";
 import type { BoltzReverseSwap, BoltzSwapStatus, SwapManagerClient } from "@arkade-os/boltz-swap";
 import type { Logger } from "./logger.js";
-import type { Registry } from "./registry.js";
+import type { Registration, Registry } from "./registry.js";
 import type { NotifyTarget, NotifyTargetKind, WebPushSubscription } from "./notifier/types.js";
 
 /**
@@ -35,8 +35,15 @@ const webPushSubscriptionSchema: z.ZodType<WebPushSubscription> = z.object({
   }),
 });
 
+/** Wire field carrying each target kind in the /register body. */
+const TARGET_FIELD: Record<NotifyTargetKind, "topic" | "subscription"> = {
+  topic: "topic",
+  webpush: "subscription",
+};
+
 // A registration must carry exactly one delivery target: a `topic` (ntfy /
-// GroundControl) or a Web Push `subscription`.
+// GroundControl) or a Web Push `subscription`. Parsed straight into the
+// discriminated NotifyTarget so handlers never juggle the raw optional fields.
 const registerSchema = z
   .object({
     topic: z.string().min(1).optional(),
@@ -46,7 +53,30 @@ const registerSchema = z
   })
   .refine((d) => Boolean(d.topic) !== Boolean(d.subscription), {
     message: "provide exactly one of `topic` or `subscription`",
-  });
+  })
+  .transform(({ topic, subscription, label, swap }) => ({
+    label,
+    swap,
+    // The refine above guarantees exactly one of the two is present.
+    target: (topic
+      ? { kind: "topic", topic }
+      : { kind: "webpush", subscription: subscription! }) satisfies NotifyTarget as NotifyTarget,
+  }));
+
+/**
+ * Web Push keys are capability credentials: endpoint + p256dh/auth is everything
+ * needed to push to the device. Never expose them on the read endpoints.
+ */
+function redactRegistration(reg: Registration): Registration {
+  if (reg.target.kind !== "webpush") return reg;
+  return {
+    ...reg,
+    target: {
+      kind: "webpush",
+      subscription: { endpoint: reg.target.subscription.endpoint, keys: { p256dh: "[redacted]", auth: "[redacted]" } },
+    },
+  };
+}
 
 export interface ServerDeps {
   registry: Registry;
@@ -88,26 +118,23 @@ export function buildServer(deps: ServerDeps) {
     if (!parsed.success) {
       return reply.code(400).send({ error: "invalid body", issues: parsed.error.issues });
     }
-    const target: NotifyTarget = parsed.data.topic
-      ? { kind: "topic", topic: parsed.data.topic }
-      : { kind: "webpush", subscription: parsed.data.subscription! };
+    const { target, label } = parsed.data;
     // Reject a target the configured provider can't address — accepting it
     // would 201 a registration whose push can never be delivered.
     if (target.kind !== targetKind) {
-      const field: Record<NotifyTargetKind, string> = { topic: "topic", webpush: "subscription" };
       return reply.code(400).send({
-        error: `the configured push provider needs a \`${field[targetKind]}\` target, got \`${field[target.kind]}\``,
+        error: `the configured push provider needs a \`${TARGET_FIELD[targetKind]}\` target, got \`${TARGET_FIELD[target.kind]}\``,
       });
     }
     const swap = parsed.data.swap as unknown as BoltzReverseSwap;
     // Subscribe first: if the manager rejects, nothing is persisted, so the
     // registry never holds a swap that isn't actually being monitored.
     await manager.addSwap(swap);
-    const reg = registry.add({ swap, target, label: parsed.data.label });
-    return reply.code(201).send({ ok: true, registration: reg });
+    const reg = registry.add({ swap, target, label });
+    return reply.code(201).send({ ok: true, registration: redactRegistration(reg) });
   });
 
-  app.get("/register", () => ({ registrations: registry.all() }));
+  app.get("/register", () => ({ registrations: registry.all().map(redactRegistration) }));
 
   app.delete<{ Params: { swapId: string } }>("/register/:swapId", async (request, reply) => {
     const { swapId } = request.params;

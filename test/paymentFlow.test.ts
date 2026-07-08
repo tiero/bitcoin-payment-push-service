@@ -242,7 +242,17 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
         payload: { swap, subscription, label: "pwa" },
       });
       expect(res.statusCode).toBe(201);
-      expect(res.json().registration.target).toEqual({ kind: "webpush", subscription });
+      // The subscription's keys are push credentials — read endpoints redact them.
+      const redacted = {
+        kind: "webpush",
+        subscription: {
+          endpoint: subscription.endpoint,
+          keys: { p256dh: "[redacted]", auth: "[redacted]" },
+        },
+      };
+      expect(res.json().registration.target).toEqual(redacted);
+      const list = await webPushApp.inject({ method: "GET", url: "/register" });
+      expect(list.json().registrations[0].target).toEqual(redacted);
 
       await ws.emitUpdate("reverse-swap-webpush", "transaction.mempool");
       await flush();

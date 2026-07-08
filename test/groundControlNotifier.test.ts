@@ -28,13 +28,20 @@ describe("GroundControlNotifier", () => {
     expect(lastFetchRequest(fetchMock).url).toBe("https://gc.example/lightningInvoiceGotSettled");
   });
 
-  it("uses title as memo when memo is omitted", async () => {
+  it("uses title as memo when memo is omitted or empty", async () => {
     const fetchMock = stubFetchOk();
     const notifier = new GroundControlNotifier("https://gc.example", silentLogger);
 
     await notifier.notify({ kind: "topic" as const, topic: "hash" }, { title: "Invoice paid", body: "ignored by GC" });
+    let body = JSON.parse(lastFetchRequest(fetchMock).init.body as string);
+    expect(body.memo).toBe("Invoice paid");
 
-    const body = JSON.parse(lastFetchRequest(fetchMock).init.body as string);
+    // The pipeline sends "" when there's no label/description — still fall back.
+    await notifier.notify(
+      { kind: "topic" as const, topic: "hash" },
+      { title: "Invoice paid", body: "b", memo: "" },
+    );
+    body = JSON.parse(lastFetchRequest(fetchMock).init.body as string);
     expect(body.memo).toBe("Invoice paid");
   });
 

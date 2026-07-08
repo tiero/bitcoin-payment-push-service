@@ -57,7 +57,8 @@ export class WebPushNotifier implements Notifier {
 
   async notify(target: NotifyTarget, payload: NotifyPayload): Promise<void> {
     // Unreachable through /register (it rejects mismatched kinds), but a stale
-    // persisted registration can hit this after a provider switch — permanent.
+    // persisted registration can hit this after a provider switch — permanent,
+    // so the delivery pipeline prunes it instead of retrying.
     if (target.kind !== "webpush") {
       throw new PermanentDeliveryError(`WebPushNotifier cannot deliver to a ${target.kind} target`);
     }
@@ -82,9 +83,11 @@ export class WebPushNotifier implements Notifier {
     } catch (err) {
       if (err instanceof WebPushError) {
         const message = `web push failed: ${err.statusCode} ${err.body ?? ""}`.trim();
-        // 404/410 mean the subscription is permanently gone (unsubscribed or
-        // expired) — RFC 8030 says stop sending to it; the caller prunes.
-        if (err.statusCode === 404 || err.statusCode === 410) {
+        // 404/410: the subscription is permanently gone (unsubscribed/expired) —
+        // RFC 8030 says stop sending to it. 401/403: the subscription is bound to
+        // a different VAPID key (e.g. after a key rotation), which no retry with
+        // the current keys can ever fix. The caller prunes either way.
+        if ([401, 403, 404, 410].includes(err.statusCode)) {
           throw new PermanentDeliveryError(message);
         }
         throw new Error(message);

@@ -24,7 +24,8 @@ export class NtfyNotifier implements Notifier {
 
   async notify(target: NotifyTarget, payload: NotifyPayload): Promise<void> {
     // Unreachable through /register (it rejects mismatched kinds), but a stale
-    // persisted registration can hit this after a provider switch — permanent.
+    // persisted registration can hit this after a provider switch — permanent,
+    // so the delivery pipeline prunes it instead of retrying.
     if (target.kind !== "topic") {
       throw new PermanentDeliveryError(`NtfyNotifier cannot deliver to a ${target.kind} target`);
     }

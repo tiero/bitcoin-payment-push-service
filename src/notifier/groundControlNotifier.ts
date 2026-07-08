@@ -24,14 +24,17 @@ export class GroundControlNotifier implements Notifier {
 
   async notify(target: NotifyTarget, payload: NotifyPayload): Promise<void> {
     // Unreachable through /register (it rejects mismatched kinds), but a stale
-    // persisted registration can hit this after a provider switch — permanent.
+    // persisted registration can hit this after a provider switch — permanent,
+    // so the delivery pipeline prunes it instead of retrying.
     if (target.kind !== "topic") {
       throw new PermanentDeliveryError(
         `GroundControlNotifier cannot deliver to a ${target.kind} target`,
       );
     }
     const body: LightningInvoiceSettledNotification = {
-      memo: payload.memo ?? payload.title,
+      // `||`, not `??`: the pipeline sends memo as "" when there's no label or
+      // invoice description, and an empty memo should still fall back to the title.
+      memo: payload.memo || payload.title,
       preimage: payload.preimage ?? "",
       hash: target.topic,
       amt_paid_sat: payload.amtPaidSat ?? 0,

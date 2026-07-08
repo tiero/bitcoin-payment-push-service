@@ -72,12 +72,20 @@ describe("Registry", () => {
     expect(reg.markStatus("missing", "invoice.settled")).toBeUndefined();
   });
 
-  it("migrates legacy flat-topic entries on load and skips target-less ones", () => {
+  it("migrates legacy flat-topic entries on load and skips undeliverable ones", () => {
     const legacy = [
       // pre-union shape: flat `topic` instead of a discriminated `target`
       { swapId: "s1", topic: "t1", swap: mockReverseSwap("s1"), createdAt: 1, updatedAt: 1 },
       // no usable delivery target at all → must be skipped, not resurrected
       { swapId: "s2", swap: mockReverseSwap("s2"), createdAt: 1, updatedAt: 1 },
+      // a subscription without its encryption keys can never be delivered to
+      {
+        swapId: "s3",
+        target: { kind: "webpush", subscription: { endpoint: "https://push.example.com/x" } },
+        swap: mockReverseSwap("s3"),
+        createdAt: 1,
+        updatedAt: 1,
+      },
     ];
     writeFileSync(file, JSON.stringify(legacy));
 
@@ -88,6 +96,7 @@ describe("Registry", () => {
     expect(reg.get("s1")?.target).toEqual({ kind: "topic", topic: "t1" });
     expect(reg.get("s1")).not.toHaveProperty("topic");
     expect(reg.get("s2")).toBeUndefined();
+    expect(reg.get("s3")).toBeUndefined();
   });
 });
 

@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from "
 import { dirname } from "node:path";
 import type { BoltzReverseSwap, BoltzSwapStatus } from "@arkade-os/boltz-swap";
 import type { Logger } from "./logger.js";
-import type { NotifyTarget, WebPushSubscription } from "./notifier/types.js";
+import type { NotifyTarget } from "./notifier/types.js";
 
 export interface Registration {
   swapId: string;
@@ -31,18 +31,24 @@ export interface RegisterInput {
 }
 
 /** On-disk shape: current entries carry `target`; legacy ones a bare `topic`. */
-type PersistedRegistration = Registration & {
-  topic?: string;
-  subscription?: WebPushSubscription;
-};
+type PersistedRegistration = Registration & { topic?: string };
 
 /** Accepts current and legacy persisted shapes; undefined if no usable target. */
 function toTarget(item: PersistedRegistration): NotifyTarget | undefined {
-  if (item.target?.kind === "topic" && item.target.topic) return item.target;
-  if (item.target?.kind === "webpush" && item.target.subscription?.endpoint) return item.target;
-  // Legacy flat fields from before NotifyTarget became a discriminated union.
+  const target = item.target as NotifyTarget | undefined;
+  if (target?.kind === "topic" && target.topic) return target;
+  // A subscription without its keys can never be delivered to (web-push requires
+  // p256dh/auth for payload encryption) — treat it like a missing target.
+  if (
+    target?.kind === "webpush" &&
+    target.subscription?.endpoint &&
+    target.subscription.keys?.p256dh &&
+    target.subscription.keys?.auth
+  ) {
+    return target;
+  }
+  // Legacy flat `topic` from before NotifyTarget became a discriminated union.
   if (typeof item.topic === "string" && item.topic) return { kind: "topic", topic: item.topic };
-  if (item.subscription?.endpoint) return { kind: "webpush", subscription: item.subscription };
   return undefined;
 }
 
@@ -73,7 +79,7 @@ export class Registry {
           this.logger.warn({ swapId: item.swapId }, "skipping persisted registration without a delivery target");
           continue;
         }
-        const { topic: _topic, subscription: _subscription, ...rest } = item;
+        const { topic: _topic, ...rest } = item;
         this.byId.set(item.swapId, { ...rest, target });
       }
       this.logger.info({ count: this.byId.size }, "loaded registrations from disk");

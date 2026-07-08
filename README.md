@@ -84,7 +84,7 @@ pnpm build && pnpm start
 | method | path | body | purpose |
 |--------|------|------|---------|
 | `POST` | `/register` | `{ swap, topic \| subscription, label? }` | watch a reverse swap (`swap` = the `pendingSwap` from `createLightningInvoice`). Provide **exactly one** of `topic` (ntfy/GroundControl) or `subscription` (a Web Push `PushSubscription`) — and it must match the configured provider, else `400` |
-| `GET` | `/register` | — | list registrations |
+| `GET` | `/register` | — | list registrations (Web Push subscription keys are redacted — they're push credentials) |
 | `DELETE` | `/register/:swapId` | — | stop watching |
 | `GET` | `/health` | — | status, ws connectivity, monitored count |
 | `GET` | `/vapidPublicKey` | — | the VAPID public key for a PWA to subscribe with (404 when Web Push isn't configured) |
@@ -184,10 +184,13 @@ pnpm test
   down) is recovered, not dropped. A synchronous in-flight guard prevents a
   re-entrant event (`mempool → confirmed`) from double-sending.
 - **…but don't retry the unretryable.** A *permanent* delivery failure — a Web Push
-  subscription the push service reports as `410 Gone` (unsubscribed/expired), or a
-  target the configured provider can't address — prunes the registration immediately
-  instead of feeding the retry sweep forever. `/register` also rejects a target kind
-  that doesn't match the configured provider up front.
+  subscription the push service reports gone (`404`/`410`) or rejected for VAPID
+  authorization (`401`/`403`, e.g. after a key rotation), or a target the configured
+  provider can't address — prunes the registration immediately instead of feeding the
+  retry sweep forever. `/register` also rejects a target kind that doesn't match the
+  configured provider up front. And failures that are never *classified* as permanent
+  still can't retry forever: a delivery that keeps failing past a retention window
+  (24h since the swap's last status change) is given up on and pruned.
 - **Bounded state.** A delivered swap, or one that reaches a terminal state
   (settled/failed/expired) without us pushing, is pruned from both the registry and
   the manager, so the persisted store stays small.
