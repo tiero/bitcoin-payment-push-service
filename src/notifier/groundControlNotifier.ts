@@ -1,5 +1,5 @@
 import type { Logger } from "../logger.js";
-import type { Notifier, NotifyPayload, NotifyTarget } from "./types.js";
+import { PermanentDeliveryError, type Notifier, type NotifyPayload, type NotifyTarget } from "./types.js";
 
 /** Body for GroundControl `POST /lightningInvoiceGotSettled`. */
 export interface LightningInvoiceSettledNotification {
@@ -15,14 +15,26 @@ export interface LightningInvoiceSettledNotification {
  * preimage hash (via `/majorTomToGroundControl`) and enqueues FCM/APNS pushes.
  */
 export class GroundControlNotifier implements Notifier {
+  readonly targetKind = "topic" as const;
+
   constructor(
     private readonly baseUrl: string,
     private readonly logger: Logger,
   ) {}
 
   async notify(target: NotifyTarget, payload: NotifyPayload): Promise<void> {
+    // Unreachable through /register (it rejects mismatched kinds), but a stale
+    // persisted registration can hit this after a provider switch — permanent,
+    // so the delivery pipeline prunes it instead of retrying.
+    if (target.kind !== "topic") {
+      throw new PermanentDeliveryError(
+        `GroundControlNotifier cannot deliver to a ${target.kind} target`,
+      );
+    }
     const body: LightningInvoiceSettledNotification = {
-      memo: payload.memo ?? payload.title,
+      // `||`, not `??`: the pipeline sends memo as "" when there's no label or
+      // invoice description, and an empty memo should still fall back to the title.
+      memo: payload.memo || payload.title,
       preimage: payload.preimage ?? "",
       hash: target.topic,
       amt_paid_sat: payload.amtPaidSat ?? 0,

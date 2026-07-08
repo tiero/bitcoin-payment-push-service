@@ -8,7 +8,7 @@ import {
 } from "@arkade-os/boltz-swap";
 import type { Logger } from "./logger.js";
 import type { Registry, Registration } from "./registry.js";
-import type { Notifier } from "./notifier/types.js";
+import { PermanentDeliveryError, type Notifier } from "./notifier/types.js";
 
 export interface PaymentServiceDeps {
   manager: SwapManagerClient;
@@ -19,6 +19,13 @@ export interface PaymentServiceDeps {
   sweepIntervalMs?: number;
   /** Delivery attempts before leaving the swap for the next sweep. Default 3. */
   deliveryAttempts?: number;
+  /**
+   * How long (since the swap's last status change) delivery keeps failing before
+   * the registration is pruned instead of re-swept — bounds retries against a
+   * target that fails persistently without ever being classified as permanent.
+   * Default 24h.
+   */
+  maxDeliveryAgeMs?: number;
 }
 
 export interface PaymentService {
@@ -30,6 +37,7 @@ export interface PaymentService {
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 const DEFAULT_DELIVERY_ATTEMPTS = 3;
+const DEFAULT_MAX_DELIVERY_AGE_MS = 24 * 60 * 60 * 1000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -51,15 +59,27 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * transition into a single send, each send is retried with backoff, and a periodic
  * sweep re-attempts claimable-or-settled-but-undelivered swaps. A delivered swap — or
  * one that reaches a *failed* terminal state without a push — is pruned from the
- * registry and the manager.
+ * registry and the manager. A {@link PermanentDeliveryError} (dead Web Push
+ * subscription, unaddressable target) also prunes: retrying it can never succeed.
  */
 export async function attachPaymentNotifications(deps: PaymentServiceDeps): Promise<PaymentService> {
   const { manager, registry, notifier, logger } = deps;
   const sweepIntervalMs = deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
   const deliveryAttempts = deps.deliveryAttempts ?? DEFAULT_DELIVERY_ATTEMPTS;
+  const maxDeliveryAgeMs = deps.maxDeliveryAgeMs ?? DEFAULT_MAX_DELIVERY_AGE_MS;
 
   // Swaps with a delivery currently in progress — guards against double-send.
   const inFlight = new Set<string>();
+
+  // Stop watching a swap. removeSwap is best-effort: the registry is the source
+  // of truth for resubscription, and deliver() is invoked as `void deliver(...)`,
+  // so a manager error here must not become an unhandled rejection.
+  const prune = async (swapId: string): Promise<void> => {
+    registry.remove(swapId);
+    await manager
+      .removeSwap(swapId)
+      .catch((err) => logger.warn({ err, swapId }, "manager.removeSwap failed"));
+  };
 
   const deliver = async (reg: Registration): Promise<void> => {
     if (inFlight.has(reg.swapId)) return;
@@ -72,30 +92,50 @@ export async function attachPaymentNotifications(deps: PaymentServiceDeps): Prom
           const swap = reg.swap;
           // `swap.request`/`response` may be absent: the /register schema accepts a
           // minimal swap ({ id, type, status }), so read these defensively.
-          await notifier.notify(
-            { topic: reg.topic },
-            {
-              title: "Payment received",
-              body: `⚡ Lightning payment received${suffix}.`,
-              tags: ["zap", "moneybag"],
-              priority: "high",
-              memo: reg.label ?? swap.request?.description ?? "",
-              preimage: swap.preimage ?? "",
-              // What the receiver actually gets: `onchainAmount` is net of Boltz
-              // fees. `invoiceAmount` is what the *payer* paid over Lightning
-              // (larger by the fee), so it's only a last-resort fallback when the
-              // wallet registered a swap without the Boltz response.
-              amtPaidSat: swap.response?.onchainAmount ?? swap.request?.invoiceAmount ?? 0,
-            },
-          );
-          // Delivered: stop watching and prune.
-          registry.remove(reg.swapId);
-          await manager.removeSwap(reg.swapId);
+          await notifier.notify(reg.target, {
+            title: "Payment received",
+            body: `⚡ Lightning payment received${suffix}.`,
+            tags: ["zap", "moneybag"],
+            priority: "high",
+            memo: reg.label ?? swap.request?.description ?? "",
+            preimage: swap.preimage ?? "",
+            // What the receiver actually gets: `onchainAmount` is net of Boltz
+            // fees. `invoiceAmount` is what the *payer* paid over Lightning
+            // (larger by the fee), so it's only a last-resort fallback when the
+            // wallet registered a swap without the Boltz response.
+            amtPaidSat: swap.response?.onchainAmount ?? swap.request?.invoiceAmount ?? 0,
+          });
+          // Delivered: stop watching and prune. (prune swallows a removeSwap
+          // error — retrying the loop here would re-notify an already-woken phone.)
+          await prune(reg.swapId);
           return;
         } catch (err) {
+          // The target itself is dead (expired/unsubscribed Web Push subscription,
+          // revoked VAPID authorization) — retrying can never succeed, so prune
+          // instead of leaving it for the sweep to hammer forever.
+          if (err instanceof PermanentDeliveryError) {
+            logger.error(
+              { err, swapId: reg.swapId },
+              "delivery target permanently unusable; pruning registration",
+            );
+            await prune(reg.swapId);
+            return;
+          }
           lastErr = err;
           if (attempt < deliveryAttempts - 1) await sleep(500 * 2 ** attempt);
         }
+      }
+      // Providers can't always classify a failure as permanent (a persistent ntfy
+      // 4xx, a misconfigured base URL): give a failing registration a full
+      // retention window of sweep retries since its last status change, then stop —
+      // otherwise a settled swap whose status never changes again retries forever.
+      if (Date.now() - reg.updatedAt > maxDeliveryAgeMs) {
+        logger.error(
+          { err: lastErr, swapId: reg.swapId, maxDeliveryAgeMs },
+          "delivery kept failing past the retention window; giving up and pruning",
+        );
+        await prune(reg.swapId);
+        return;
       }
       // Left registered & claimable — the sweep will retry it later.
       logger.error(
@@ -124,8 +164,7 @@ export async function attachPaymentNotifications(deps: PaymentServiceDeps): Prom
     // Failed terminal (expired/refunded) → nothing to notify, just stop tracking it.
     if (isReverseFinalStatus(swap.status)) {
       logger.info({ swapId: swap.id, status: swap.status }, "reverse swap failed; pruning");
-      registry.remove(swap.id);
-      void manager.removeSwap(swap.id);
+      void prune(swap.id);
     }
   };
 
@@ -138,8 +177,7 @@ export async function attachPaymentNotifications(deps: PaymentServiceDeps): Prom
       if (isReverseClaimableStatus(reg.swap.status) || isReverseSuccessStatus(reg.swap.status)) {
         if (!inFlight.has(reg.swapId)) void deliver(reg);
       } else if (isReverseFinalStatus(reg.swap.status)) {
-        registry.remove(reg.swapId);
-        void manager.removeSwap(reg.swapId);
+        void prune(reg.swapId);
       }
     }
   };

@@ -1,6 +1,7 @@
 import { vi } from "vitest";
 import type { BoltzReverseSwap, BoltzSwapStatus } from "@arkade-os/boltz-swap";
 import type { Logger } from "../src/logger.js";
+import type { WebPushSubscription } from "../src/notifier/types.js";
 
 export const silentLogger = {
   fatal: () => {},
@@ -56,6 +57,17 @@ export function mockReverseSwap(
       },
     },
   } as unknown as BoltzReverseSwap;
+}
+
+/** A W3C Push API subscription as a PWA would post it to /register. */
+export function mockPushSubscription(
+  overrides: Partial<WebPushSubscription> = {},
+): WebPushSubscription {
+  return {
+    endpoint: "https://push.example.com/abc",
+    keys: { p256dh: "p256dh-key", auth: "auth-secret" },
+    ...overrides,
+  };
 }
 
 /** Stub global fetch with a controllable response factory. */

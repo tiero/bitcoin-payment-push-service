@@ -1,5 +1,5 @@
 import type { Logger } from "../logger.js";
-import type { Notifier, NotifyPayload, NotifyTarget } from "./types.js";
+import { PermanentDeliveryError, type Notifier, type NotifyPayload, type NotifyTarget } from "./types.js";
 
 const PRIORITY_MAP: Record<NonNullable<NotifyPayload["priority"]>, string> = {
   min: "1",
@@ -15,12 +15,20 @@ const PRIORITY_MAP: Record<NonNullable<NotifyPayload["priority"]>, string> = {
  * NotifyTarget. No account or API key required.
  */
 export class NtfyNotifier implements Notifier {
+  readonly targetKind = "topic" as const;
+
   constructor(
     private readonly baseUrl: string,
     private readonly logger: Logger,
   ) {}
 
   async notify(target: NotifyTarget, payload: NotifyPayload): Promise<void> {
+    // Unreachable through /register (it rejects mismatched kinds), but a stale
+    // persisted registration can hit this after a provider switch — permanent,
+    // so the delivery pipeline prunes it instead of retrying.
+    if (target.kind !== "topic") {
+      throw new PermanentDeliveryError(`NtfyNotifier cannot deliver to a ${target.kind} target`);
+    }
     const url = `${this.baseUrl.replace(/\/$/, "")}/${encodeURIComponent(target.topic)}`;
     // HTTP header values are Latin-1; emit the (possibly UTF-8/emoji) title as raw
     // UTF-8 bytes mapped into a Latin-1 string. ntfy decodes header bytes as UTF-8.

@@ -8,7 +8,7 @@ import { createSwapWatcher } from "../src/swapWatcher.js";
 import { attachPaymentNotifications, type PaymentService } from "../src/paymentService.js";
 import { buildServer } from "../src/server.js";
 import type { Notifier, NotifyPayload, NotifyTarget } from "../src/notifier/types.js";
-import { flush, mockReverseSwap, silentLogger } from "./helpers.js";
+import { flush, mockPushSubscription, mockReverseSwap, silentLogger } from "./helpers.js";
 
 /**
  * Controllable stand-in for `globalThis.WebSocket`. The real boltz-swap
@@ -52,6 +52,7 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
   let dir: string;
   let manager: SwapManagerClient;
   let payments: PaymentService;
+  let registry: Registry;
   let app: ReturnType<typeof buildServer>;
   let notify: ReturnType<typeof vi.fn>;
   let notifier: Notifier;
@@ -70,7 +71,7 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
     notify = vi.fn(async () => {});
     notifier = { notify } as unknown as Notifier;
 
-    const registry = new Registry(join(dir, "reg.json"), silentLogger);
+    registry = new Registry(join(dir, "reg.json"), silentLogger);
     registry.load();
     manager = createSwapWatcher(
       { network: "mutinynet", apiUrl: "https://api.boltz.mutinynet.arkade.sh", pollIntervalMs: 600_000 },
@@ -84,7 +85,13 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
       sweepIntervalMs: 3_600_000,
     });
 
-    app = buildServer({ registry, manager, simulate: payments.onSwapUpdate, logger: silentLogger });
+    app = buildServer({
+      registry,
+      manager,
+      simulate: payments.onSwapUpdate,
+      logger: silentLogger,
+      targetKind: "topic",
+    });
     await app.ready();
 
     await manager.start([]);
@@ -130,7 +137,7 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
 
     expect(notify).toHaveBeenCalledOnce();
     const [target, payload] = notify.mock.calls[0]! as [NotifyTarget, NotifyPayload];
-    expect(target).toEqual({ topic: hash });
+    expect(target).toEqual({ kind: "topic", topic: hash });
     expect(payload).toMatchObject({
       title: "Payment received",
       body: "⚡ Lightning payment received (1000 sats).",
@@ -215,6 +222,86 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it("registers a Web Push subscription and wakes it with the subscription target", async () => {
+    const ws = FakeWebSocket.instances[0]!;
+    const subscription = mockPushSubscription({ endpoint: "https://push.example.com/xyz" });
+    const swap = mockReverseSwap("reverse-swap-webpush", "swap.created", { onchainAmount: 2500 });
+
+    // Same registry/manager/pipeline, but configured for a Web Push provider.
+    const webPushApp = buildServer({
+      registry,
+      manager,
+      simulate: payments.onSwapUpdate,
+      logger: silentLogger,
+      targetKind: "webpush",
+    });
+    try {
+      const res = await webPushApp.inject({
+        method: "POST",
+        url: "/register",
+        payload: { swap, subscription, label: "pwa" },
+      });
+      expect(res.statusCode).toBe(201);
+      // The subscription's keys are push credentials — read endpoints redact them.
+      const redacted = {
+        kind: "webpush",
+        subscription: {
+          endpoint: subscription.endpoint,
+          keys: { p256dh: "[redacted]", auth: "[redacted]" },
+        },
+      };
+      expect(res.json().registration.target).toEqual(redacted);
+      const list = await webPushApp.inject({ method: "GET", url: "/register" });
+      expect(list.json().registrations[0].target).toEqual(redacted);
+
+      await ws.emitUpdate("reverse-swap-webpush", "transaction.mempool");
+      await flush();
+
+      expect(notify).toHaveBeenCalledOnce();
+      const [target, payload] = notify.mock.calls[0]! as [NotifyTarget, NotifyPayload];
+      expect(target).toEqual({ kind: "webpush", subscription });
+      expect(payload).toMatchObject({ title: "Payment received", amtPaidSat: 2500 });
+    } finally {
+      await webPushApp.close();
+    }
+  });
+
+  it("rejects a registration whose target kind the configured provider can't deliver to", async () => {
+    // The fixture app is topic-addressed (ntfy/GroundControl) → a Web Push
+    // subscription must be rejected up front, not accepted and left undeliverable.
+    const res = await app.inject({
+      method: "POST",
+      url: "/register",
+      payload: {
+        swap: mockReverseSwap("reverse-swap-mismatch"),
+        subscription: mockPushSubscription(),
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/topic/);
+    expect(notify).not.toHaveBeenCalled();
+    expect(await manager.hasSwap("reverse-swap-mismatch")).toBe(false);
+  });
+
+  it("rejects a registration that carries both a topic and a subscription", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/register",
+      payload: {
+        swap: mockReverseSwap("reverse-swap-both"),
+        topic: "t",
+        subscription: mockPushSubscription(),
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("GET /vapidPublicKey returns 404 when Web Push is not configured", async () => {
+    const res = await app.inject({ method: "GET", url: "/vapidPublicKey" });
+    expect(res.statusCode).toBe(404);
+  });
+
   it("DELETE /register/:swapId stops monitoring without notifying", async () => {
     await app.inject({
       method: "POST",
@@ -262,5 +349,27 @@ describe("payment flow (real SwapManager, mocked Boltz events)", () => {
     await flush();
 
     expect(notify).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("GET /vapidPublicKey", () => {
+  it("serves the configured VAPID public key so a PWA can subscribe", async () => {
+    // The endpoint only reads deps.vapidPublicKey, so the rest can be stubbed.
+    const app = buildServer({
+      registry: {} as never,
+      manager: {} as never,
+      simulate: () => {},
+      logger: silentLogger,
+      targetKind: "webpush",
+      vapidPublicKey: "BTestPublicKey",
+    });
+    await app.ready();
+    try {
+      const res = await app.inject({ method: "GET", url: "/vapidPublicKey" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ publicKey: "BTestPublicKey" });
+    } finally {
+      await app.close();
+    }
   });
 });

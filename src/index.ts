@@ -23,7 +23,15 @@ async function main(): Promise<void> {
   logger.info({ resumed: pending.length }, "SwapManager started");
 
   const { buildServer } = await import("./server.js");
-  const app = buildServer({ registry, manager, simulate: payments.onSwapUpdate, logger });
+  const provider = config.provider;
+  const app = buildServer({
+    registry,
+    manager,
+    simulate: payments.onSwapUpdate,
+    logger,
+    targetKind: notifier.targetKind,
+    vapidPublicKey: provider.kind === "webpush" ? provider.vapid.publicKey : undefined,
+  });
   await app.listen({ host: "0.0.0.0", port: config.PORT });
   logger.info({ port: config.PORT, network: config.NETWORK }, "service listening");
 

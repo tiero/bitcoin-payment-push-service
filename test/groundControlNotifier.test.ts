@@ -13,7 +13,7 @@ describe("GroundControlNotifier", () => {
 
     await expect(
       notifier.notify(
-        { topic: "ab".repeat(32) },
+        { kind: "topic" as const, topic: "ab".repeat(32) },
         { title: "Payment received", body: "settled", amtPaidSat: 5000 },
       ),
     ).resolves.toBeUndefined();
@@ -23,18 +23,25 @@ describe("GroundControlNotifier", () => {
     const fetchMock = stubFetchOk();
     const notifier = new GroundControlNotifier("https://gc.example/", silentLogger);
 
-    await notifier.notify({ topic: "hash" }, { title: "t", body: "b" });
+    await notifier.notify({ kind: "topic" as const, topic: "hash" }, { title: "t", body: "b" });
 
     expect(lastFetchRequest(fetchMock).url).toBe("https://gc.example/lightningInvoiceGotSettled");
   });
 
-  it("uses title as memo when memo is omitted", async () => {
+  it("uses title as memo when memo is omitted or empty", async () => {
     const fetchMock = stubFetchOk();
     const notifier = new GroundControlNotifier("https://gc.example", silentLogger);
 
-    await notifier.notify({ topic: "hash" }, { title: "Invoice paid", body: "ignored by GC" });
+    await notifier.notify({ kind: "topic" as const, topic: "hash" }, { title: "Invoice paid", body: "ignored by GC" });
+    let body = JSON.parse(lastFetchRequest(fetchMock).init.body as string);
+    expect(body.memo).toBe("Invoice paid");
 
-    const body = JSON.parse(lastFetchRequest(fetchMock).init.body as string);
+    // The pipeline sends "" when there's no label/description — still fall back.
+    await notifier.notify(
+      { kind: "topic" as const, topic: "hash" },
+      { title: "Invoice paid", body: "b", memo: "" },
+    );
+    body = JSON.parse(lastFetchRequest(fetchMock).init.body as string);
     expect(body.memo).toBe("Invoice paid");
   });
 
@@ -44,7 +51,7 @@ describe("GroundControlNotifier", () => {
     const hash = "cd".repeat(32);
 
     await notifier.notify(
-      { topic: hash },
+      { kind: "topic" as const, topic: hash },
       { title: "t", body: "b", memo: "m", preimage: "ee".repeat(32), amtPaidSat: 99 },
     );
 
@@ -66,7 +73,7 @@ describe("GroundControlNotifier", () => {
     const notifier = new GroundControlNotifier("https://gc.example", silentLogger);
 
     await expect(
-      notifier.notify({ topic: "hash" }, { title: "t", body: "b" }),
+      notifier.notify({ kind: "topic" as const, topic: "hash" }, { title: "t", body: "b" }),
     ).rejects.toThrow("preimage doesnt match hash");
   });
 
@@ -77,7 +84,7 @@ describe("GroundControlNotifier", () => {
     const notifier = new GroundControlNotifier("https://gc.example", silentLogger);
 
     await expect(
-      notifier.notify({ topic: "hash" }, { title: "t", body: "b" }),
+      notifier.notify({ kind: "topic" as const, topic: "hash" }, { title: "t", body: "b" }),
     ).rejects.toThrow("connection reset");
   });
 });

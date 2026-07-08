@@ -48,7 +48,7 @@ describe("delivery reliability", () => {
       deliveryAttempts: 1,
     });
 
-    registry.add({ swap: mockReverseSwap("s1", "transaction.mempool"), topic: "t1" });
+    registry.add({ swap: mockReverseSwap("s1", "transaction.mempool"), target: { kind: "topic" as const, topic: "t1" } });
 
     await vi.waitFor(
       () => {
