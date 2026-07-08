@@ -2,17 +2,16 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from "
 import { dirname } from "node:path";
 import type { BoltzReverseSwap, BoltzSwapStatus } from "@arkade-os/boltz-swap";
 import type { Logger } from "./logger.js";
-import type { WebPushSubscription } from "./notifier/types.js";
+import type { NotifyTarget, WebPushSubscription } from "./notifier/types.js";
 
 export interface Registration {
   swapId: string;
   /**
-   * Delivery target for the string-addressed providers: ntfy topic, or preimage
-   * hash when using GroundControl. Absent for Web Push (see `subscription`).
+   * Where to deliver the push: a topic (ntfy) / preimage hash (GroundControl),
+   * or a Web Push subscription. Discriminated so a registration without a
+   * usable delivery target is unrepresentable.
    */
-  topic?: string;
-  /** Web Push subscription, when the wallet/PWA registered one instead of a topic. */
-  subscription?: WebPushSubscription;
+  target: NotifyTarget;
   label?: string;
   /**
    * The pending reverse swap as supplied by the wallet at registration time.
@@ -26,10 +25,25 @@ export interface Registration {
 }
 
 export interface RegisterInput {
-  topic?: string;
-  subscription?: WebPushSubscription;
+  target: NotifyTarget;
   label?: string;
   swap: BoltzReverseSwap;
+}
+
+/** On-disk shape: current entries carry `target`; legacy ones a bare `topic`. */
+type PersistedRegistration = Registration & {
+  topic?: string;
+  subscription?: WebPushSubscription;
+};
+
+/** Accepts current and legacy persisted shapes; undefined if no usable target. */
+function toTarget(item: PersistedRegistration): NotifyTarget | undefined {
+  if (item.target?.kind === "topic" && item.target.topic) return item.target;
+  if (item.target?.kind === "webpush" && item.target.subscription?.endpoint) return item.target;
+  // Legacy flat fields from before NotifyTarget became a discriminated union.
+  if (typeof item.topic === "string" && item.topic) return { kind: "topic", topic: item.topic };
+  if (item.subscription?.endpoint) return { kind: "webpush", subscription: item.subscription };
+  return undefined;
 }
 
 /**
@@ -52,8 +66,16 @@ export class Registry {
     if (!existsSync(this.filePath)) return;
     try {
       const raw = readFileSync(this.filePath, "utf8");
-      const items = JSON.parse(raw) as Registration[];
-      for (const item of items) this.byId.set(item.swapId, item);
+      const items = JSON.parse(raw) as PersistedRegistration[];
+      for (const item of items) {
+        const target = toTarget(item);
+        if (!item.swapId || !item.swap || !target) {
+          this.logger.warn({ swapId: item.swapId }, "skipping persisted registration without a delivery target");
+          continue;
+        }
+        const { topic: _topic, subscription: _subscription, ...rest } = item;
+        this.byId.set(item.swapId, { ...rest, target });
+      }
       this.logger.info({ count: this.byId.size }, "loaded registrations from disk");
     } catch (err) {
       this.logger.error({ err, filePath: this.filePath }, "failed to load registrations");
@@ -77,8 +99,7 @@ export class Registry {
     const existing = this.byId.get(swapId);
     const reg: Registration = {
       swapId,
-      topic: input.topic,
-      subscription: input.subscription,
+      target: input.target,
       label: input.label,
       swap: input.swap,
       createdAt: existing?.createdAt ?? now,

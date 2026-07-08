@@ -57,7 +57,38 @@ const envSchema = z
           "Set exactly one push provider: NTFY_BASE_URL, GROUNDCONTROL_BASE_URL, or VAPID_* (Web Push)",
       });
     }
-  });
+  })
+  // Collapse the raw env vars into a single discriminated provider so selection
+  // logic exists exactly once; everything downstream switches on `provider.kind`.
+  .transform((data) => ({ ...data, provider: toProvider(data) }));
+
+/** The single push provider the service is configured with. */
+export type ProviderConfig =
+  | { kind: "ntfy"; baseUrl: string }
+  | { kind: "groundcontrol"; baseUrl: string }
+  | { kind: "webpush"; vapid: { subject: string; publicKey: string; privateKey: string } };
+
+function toProvider(data: {
+  NTFY_BASE_URL?: string;
+  GROUNDCONTROL_BASE_URL?: string;
+  VAPID_PUBLIC_KEY?: string;
+  VAPID_PRIVATE_KEY?: string;
+  VAPID_SUBJECT?: string;
+}): ProviderConfig {
+  if (data.NTFY_BASE_URL) return { kind: "ntfy", baseUrl: data.NTFY_BASE_URL };
+  if (data.GROUNDCONTROL_BASE_URL) {
+    return { kind: "groundcontrol", baseUrl: data.GROUNDCONTROL_BASE_URL };
+  }
+  // The superRefine above guarantees the remaining case is a complete VAPID set.
+  return {
+    kind: "webpush",
+    vapid: {
+      subject: data.VAPID_SUBJECT!,
+      publicKey: data.VAPID_PUBLIC_KEY!,
+      privateKey: data.VAPID_PRIVATE_KEY!,
+    },
+  };
+}
 
 export type Network = z.infer<typeof networkSchema>;
 export type Config = z.infer<typeof envSchema>;

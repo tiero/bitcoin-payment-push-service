@@ -45,7 +45,7 @@ wallet ──POST /register {swap, topic}──▶ service ── @arkade-os/bol
 |------|----------------|
 | `src/swapWatcher.ts` | builds the `@arkade-os/boltz-swap` `SwapManager` (monitor-only) |
 | `src/paymentService.ts` | wires `SwapManager` events → push when claimable (via `isReverseClaimableStatus`); prunes on delivery/terminal |
-| `src/registry.ts` | persisted `swapId → {topic\|subscription, swap}` map; resubscribed on restart |
+| `src/registry.ts` | persisted `swapId → {target, swap}` map; resubscribed on restart |
 | `src/notifier/ntfyNotifier.ts` | `Notifier` implementation for ntfy.sh |
 | `src/notifier/webPushNotifier.ts` | `Notifier` implementation for the W3C Web Push API (PWAs), signed with VAPID |
 | `src/server.ts` | HTTP API |
@@ -83,7 +83,7 @@ pnpm build && pnpm start
 
 | method | path | body | purpose |
 |--------|------|------|---------|
-| `POST` | `/register` | `{ swap, topic \| subscription, label? }` | watch a reverse swap (`swap` = the `pendingSwap` from `createLightningInvoice`). Provide **exactly one** of `topic` (ntfy/GroundControl) or `subscription` (a Web Push `PushSubscription`) |
+| `POST` | `/register` | `{ swap, topic \| subscription, label? }` | watch a reverse swap (`swap` = the `pendingSwap` from `createLightningInvoice`). Provide **exactly one** of `topic` (ntfy/GroundControl) or `subscription` (a Web Push `PushSubscription`) — and it must match the configured provider, else `400` |
 | `GET` | `/register` | — | list registrations |
 | `DELETE` | `/register/:swapId` | — | stop watching |
 | `GET` | `/health` | — | status, ws connectivity, monitored count |
@@ -169,10 +169,12 @@ pnpm test
 - `test/deliveryRetry.test.ts` — proves a transient `notify` failure is **not**
   lost: the reconciliation sweep redelivers a claimable-but-undelivered swap and then
   prunes it.
-- `test/webPushNotifier.test.ts` — the Web Push notifier: VAPID setup, JSON payload,
-  priority→urgency mapping, and mapping a `410 Gone` from the push service to an error.
-  `test/paymentFlow.test.ts` also covers registering a `subscription`, the
-  topic/subscription mutual exclusion, and `GET /vapidPublicKey`.
+- `test/webPushNotifier.test.ts` — the Web Push notifier: per-call VAPID details,
+  JSON payload, priority→urgency mapping, and `410 Gone` → permanent failure.
+  `test/paymentFlow.test.ts` also covers registering a `subscription`, rejection of
+  a target kind the configured provider can't deliver to, the topic/subscription
+  mutual exclusion, and `GET /vapidPublicKey`; `test/paymentService.test.ts` covers
+  immediate pruning on permanent delivery failures.
 
 ## Reliability
 
@@ -181,6 +183,11 @@ pnpm test
   so a transient push-provider outage (or becoming claimable while the process was
   down) is recovered, not dropped. A synchronous in-flight guard prevents a
   re-entrant event (`mempool → confirmed`) from double-sending.
+- **…but don't retry the unretryable.** A *permanent* delivery failure — a Web Push
+  subscription the push service reports as `410 Gone` (unsubscribed/expired), or a
+  target the configured provider can't address — prunes the registration immediately
+  instead of feeding the retry sweep forever. `/register` also rejects a target kind
+  that doesn't match the configured provider up front.
 - **Bounded state.** A delivered swap, or one that reaches a terminal state
   (settled/failed/expired) without us pushing, is pruned from both the registry and
   the manager, so the persisted store stays small.

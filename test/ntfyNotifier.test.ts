@@ -13,7 +13,7 @@ describe("NtfyNotifier", () => {
 
     await expect(
       notifier.notify(
-        { topic: "my-phone" },
+        { kind: "topic" as const, topic: "my-phone" },
         { title: "Payment received", body: "⚡ settled" },
       ),
     ).resolves.toBeUndefined();
@@ -23,7 +23,7 @@ describe("NtfyNotifier", () => {
     const fetchMock = stubFetchOk();
     const notifier = new NtfyNotifier("https://ntfy.example/", silentLogger);
 
-    await notifier.notify({ topic: "my phone" }, { title: "t", body: "hello" });
+    await notifier.notify({ kind: "topic" as const, topic: "my phone" }, { title: "t", body: "hello" });
 
     const { url, init } = lastFetchRequest(fetchMock);
     expect(url).toBe("https://ntfy.example/my%20phone");
@@ -36,7 +36,7 @@ describe("NtfyNotifier", () => {
     const notifier = new NtfyNotifier("https://ntfy.example", silentLogger);
     const title = "Payment ⚡";
 
-    await notifier.notify({ topic: "t" }, { title, body: "b" });
+    await notifier.notify({ kind: "topic" as const, topic: "t" }, { title, body: "b" });
 
     const headers = lastFetchRequest(fetchMock).init.headers as Record<string, string>;
     expect(headers.Title).toBe(Buffer.from(title, "utf8").toString("latin1"));
@@ -47,13 +47,13 @@ describe("NtfyNotifier", () => {
     const fetchMock = stubFetchOk();
     const notifier = new NtfyNotifier("https://ntfy.example", silentLogger);
 
-    await notifier.notify({ topic: "t" }, { title: "t", body: "b" });
+    await notifier.notify({ kind: "topic" as const, topic: "t" }, { title: "t", body: "b" });
     let headers = lastFetchRequest(fetchMock).init.headers as Record<string, string>;
     expect(headers.Tags).toBeUndefined();
     expect(headers.Priority).toBeUndefined();
 
     await notifier.notify(
-      { topic: "t" },
+      { kind: "topic" as const, topic: "t" },
       { title: "t", body: "b", tags: ["zap"], priority: "high" },
     );
     headers = lastFetchRequest(fetchMock).init.headers as Record<string, string>;
@@ -74,7 +74,7 @@ describe("NtfyNotifier", () => {
     const notifier = new NtfyNotifier("https://ntfy.example", silentLogger);
 
     await expect(
-      notifier.notify({ topic: "t" }, { title: "t", body: "b" }),
+      notifier.notify({ kind: "topic" as const, topic: "t" }, { title: "t", body: "b" }),
     ).rejects.toThrow("rate limited");
   });
 });

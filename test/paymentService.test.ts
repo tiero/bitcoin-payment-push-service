@@ -5,7 +5,12 @@ import { join } from "node:path";
 import type { SwapManagerClient } from "@arkade-os/boltz-swap";
 import { Registry } from "../src/registry.js";
 import { attachPaymentNotifications, type PaymentService } from "../src/paymentService.js";
-import type { Notifier, NotifyPayload, NotifyTarget } from "../src/notifier/types.js";
+import {
+  PermanentDeliveryError,
+  type Notifier,
+  type NotifyPayload,
+  type NotifyTarget,
+} from "../src/notifier/types.js";
 import { flush, mockReverseSwap, silentLogger } from "./helpers.js";
 
 function fakeManager(removeSwap = vi.fn(async () => {})): SwapManagerClient {
@@ -59,7 +64,7 @@ describe("attachPaymentNotifications", () => {
         onchainAmount: 41_900, // net of Boltz fees, what the receiver claims
         description: "latte",
       }),
-      topic: hash,
+      target: { kind: "topic", topic: hash },
       label: "42k sats",
     });
 
@@ -69,7 +74,7 @@ describe("attachPaymentNotifications", () => {
 
     expect(notify).toHaveBeenCalledOnce();
     const [target, payload] = notify.mock.calls[0]! as [NotifyTarget, NotifyPayload];
-    expect(target).toEqual({ topic: hash });
+    expect(target).toEqual({ kind: "topic", topic: hash });
     expect(payload).toMatchObject({
       title: "Payment received",
       body: "⚡ Lightning payment received (42k sats).",
@@ -100,7 +105,7 @@ describe("attachPaymentNotifications", () => {
       sweepIntervalMs: 3_600_000,
     });
 
-    registry.add({ swap: mockReverseSwap("s1", "transaction.mempool"), topic: "t1" });
+    registry.add({ swap: mockReverseSwap("s1", "transaction.mempool"), target: { kind: "topic" as const, topic: "t1" } });
     payments.onSwapUpdate(mockReverseSwap("s1", "transaction.mempool"), "swap.created");
 
     // Inline retries back off (500ms, 1s) between attempts.
@@ -109,9 +114,38 @@ describe("attachPaymentNotifications", () => {
     expect(removeSwap).toHaveBeenCalledWith("s1");
   });
 
+  it("prunes immediately on a permanent delivery failure instead of retrying", async () => {
+    dir = mkdtempSync(join(tmpdir(), "pay-"));
+    registry = new Registry(join(dir, "reg.json"), silentLogger);
+    removeSwap = vi.fn(async () => {});
+    // e.g. a Web Push subscription the push service reports as 410 Gone.
+    notify = vi.fn(async () => {
+      throw new PermanentDeliveryError("web push failed: 410 unsubscribed");
+    });
+    notifier = { targetKind: "webpush", notify } as unknown as Notifier;
+    payments = await attachPaymentNotifications({
+      manager: fakeManager(removeSwap),
+      registry,
+      notifier,
+      logger: silentLogger,
+      deliveryAttempts: 3,
+      sweepIntervalMs: 3_600_000,
+    });
+
+    registry.add({ swap: mockReverseSwap("s1"), target: { kind: "topic", topic: "stale" } });
+    payments.onSwapUpdate(mockReverseSwap("s1", "transaction.mempool"), "swap.created");
+    await flush();
+
+    // No inline retries (would be 3 for a transient error) and no sweep re-attempt:
+    // the registration is gone.
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(registry.get("s1")).toBeUndefined();
+    expect(removeSwap).toHaveBeenCalledWith("s1");
+  });
+
   it("prunes failed reverse swaps without notifying", async () => {
     await start();
-    registry.add({ swap: mockReverseSwap("s1"), topic: "t1" });
+    registry.add({ swap: mockReverseSwap("s1"), target: { kind: "topic" as const, topic: "t1" } });
 
     payments.onSwapUpdate(mockReverseSwap("s1", "invoice.expired"), "swap.created");
     await flush();
@@ -123,7 +157,7 @@ describe("attachPaymentNotifications", () => {
 
   it("wakes once on settled when the claimable window was never observed (offline claimer)", async () => {
     await start();
-    registry.add({ swap: mockReverseSwap("s1"), topic: "t1" });
+    registry.add({ swap: mockReverseSwap("s1"), target: { kind: "topic" as const, topic: "t1" } });
 
     // We never saw the claimable window (e.g. an offline claimer finalized the
     // receive, or the process was down) and the next update we observe is already
@@ -165,7 +199,7 @@ describe("attachPaymentNotifications", () => {
       sweepIntervalMs: 3_600_000,
     });
 
-    registry.add({ swap: mockReverseSwap("s1"), topic: "t1" });
+    registry.add({ swap: mockReverseSwap("s1"), target: { kind: "topic" as const, topic: "t1" } });
     // mempool then confirmed are both claimable; the in-flight guard must collapse
     // them into a single send.
     payments.onSwapUpdate(mockReverseSwap("s1", "transaction.mempool"), "swap.created");

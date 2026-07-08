@@ -8,7 +8,7 @@ import {
 } from "@arkade-os/boltz-swap";
 import type { Logger } from "./logger.js";
 import type { Registry, Registration } from "./registry.js";
-import type { Notifier } from "./notifier/types.js";
+import { PermanentDeliveryError, type Notifier } from "./notifier/types.js";
 
 export interface PaymentServiceDeps {
   manager: SwapManagerClient;
@@ -51,7 +51,8 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * transition into a single send, each send is retried with backoff, and a periodic
  * sweep re-attempts claimable-or-settled-but-undelivered swaps. A delivered swap — or
  * one that reaches a *failed* terminal state without a push — is pruned from the
- * registry and the manager.
+ * registry and the manager. A {@link PermanentDeliveryError} (dead Web Push
+ * subscription, unaddressable target) also prunes: retrying it can never succeed.
  */
 export async function attachPaymentNotifications(deps: PaymentServiceDeps): Promise<PaymentService> {
   const { manager, registry, notifier, logger } = deps;
@@ -72,27 +73,36 @@ export async function attachPaymentNotifications(deps: PaymentServiceDeps): Prom
           const swap = reg.swap;
           // `swap.request`/`response` may be absent: the /register schema accepts a
           // minimal swap ({ id, type, status }), so read these defensively.
-          await notifier.notify(
-            { topic: reg.topic, subscription: reg.subscription },
-            {
-              title: "Payment received",
-              body: `⚡ Lightning payment received${suffix}.`,
-              tags: ["zap", "moneybag"],
-              priority: "high",
-              memo: reg.label ?? swap.request?.description ?? "",
-              preimage: swap.preimage ?? "",
-              // What the receiver actually gets: `onchainAmount` is net of Boltz
-              // fees. `invoiceAmount` is what the *payer* paid over Lightning
-              // (larger by the fee), so it's only a last-resort fallback when the
-              // wallet registered a swap without the Boltz response.
-              amtPaidSat: swap.response?.onchainAmount ?? swap.request?.invoiceAmount ?? 0,
-            },
-          );
+          await notifier.notify(reg.target, {
+            title: "Payment received",
+            body: `⚡ Lightning payment received${suffix}.`,
+            tags: ["zap", "moneybag"],
+            priority: "high",
+            memo: reg.label ?? swap.request?.description ?? "",
+            preimage: swap.preimage ?? "",
+            // What the receiver actually gets: `onchainAmount` is net of Boltz
+            // fees. `invoiceAmount` is what the *payer* paid over Lightning
+            // (larger by the fee), so it's only a last-resort fallback when the
+            // wallet registered a swap without the Boltz response.
+            amtPaidSat: swap.response?.onchainAmount ?? swap.request?.invoiceAmount ?? 0,
+          });
           // Delivered: stop watching and prune.
           registry.remove(reg.swapId);
           await manager.removeSwap(reg.swapId);
           return;
         } catch (err) {
+          // The target itself is dead (expired/unsubscribed Web Push subscription,
+          // or a kind the provider can't address) — retrying can never succeed, so
+          // prune instead of leaving it for the sweep to hammer forever.
+          if (err instanceof PermanentDeliveryError) {
+            logger.error(
+              { err, swapId: reg.swapId },
+              "delivery target permanently unusable; pruning registration",
+            );
+            registry.remove(reg.swapId);
+            await manager.removeSwap(reg.swapId);
+            return;
+          }
           lastErr = err;
           if (attempt < deliveryAttempts - 1) await sleep(500 * 2 ** attempt);
         }

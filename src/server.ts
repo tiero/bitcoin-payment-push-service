@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { BoltzReverseSwap, BoltzSwapStatus, SwapManagerClient } from "@arkade-os/boltz-swap";
 import type { Logger } from "./logger.js";
 import type { Registry } from "./registry.js";
+import type { NotifyTarget, NotifyTargetKind, WebPushSubscription } from "./notifier/types.js";
 
 /**
  * A reverse swap as handed over by the wallet. Validated loosely: we only require
@@ -21,10 +22,13 @@ const reverseSwapSchema = z
   })
   .passthrough();
 
-/** A W3C Push API subscription (`subscription.toJSON()`) for Web Push delivery. */
-const webPushSubscriptionSchema = z.object({
+/**
+ * A W3C Push API subscription (`subscription.toJSON()`) for Web Push delivery.
+ * Anchored to the `web-push` library's type so schema and type can't drift.
+ * (The browser also emits `expirationTime`; it's optional, unused, and stripped.)
+ */
+const webPushSubscriptionSchema: z.ZodType<WebPushSubscription> = z.object({
   endpoint: z.string().url(),
-  expirationTime: z.number().nullable().optional(),
   keys: z.object({
     p256dh: z.string().min(1),
     auth: z.string().min(1),
@@ -50,12 +54,14 @@ export interface ServerDeps {
   /** Inject a synthetic swap update through the same pipeline (for manual testing). */
   simulate: (swap: BoltzReverseSwap, oldStatus: BoltzSwapStatus) => void;
   logger: Logger;
+  /** Target kind the configured notifier can deliver to; /register rejects the rest. */
+  targetKind: NotifyTargetKind;
   /** VAPID public key, exposed at `GET /vapidPublicKey` so a PWA can subscribe. */
   vapidPublicKey?: string;
 }
 
 export function buildServer(deps: ServerDeps) {
-  const { registry, manager, simulate, logger, vapidPublicKey } = deps;
+  const { registry, manager, simulate, logger, targetKind, vapidPublicKey } = deps;
   const app = Fastify({ loggerInstance: logger });
 
   // A PWA fetches this to call `PushManager.subscribe({ applicationServerKey })`,
@@ -82,16 +88,22 @@ export function buildServer(deps: ServerDeps) {
     if (!parsed.success) {
       return reply.code(400).send({ error: "invalid body", issues: parsed.error.issues });
     }
+    const target: NotifyTarget = parsed.data.topic
+      ? { kind: "topic", topic: parsed.data.topic }
+      : { kind: "webpush", subscription: parsed.data.subscription! };
+    // Reject a target the configured provider can't address — accepting it
+    // would 201 a registration whose push can never be delivered.
+    if (target.kind !== targetKind) {
+      const field: Record<NotifyTargetKind, string> = { topic: "topic", webpush: "subscription" };
+      return reply.code(400).send({
+        error: `the configured push provider needs a \`${field[targetKind]}\` target, got \`${field[target.kind]}\``,
+      });
+    }
     const swap = parsed.data.swap as unknown as BoltzReverseSwap;
     // Subscribe first: if the manager rejects, nothing is persisted, so the
     // registry never holds a swap that isn't actually being monitored.
     await manager.addSwap(swap);
-    const reg = registry.add({
-      swap,
-      topic: parsed.data.topic,
-      subscription: parsed.data.subscription,
-      label: parsed.data.label,
-    });
+    const reg = registry.add({ swap, target, label: parsed.data.label });
     return reply.code(201).send({ ok: true, registration: reg });
   });
 

@@ -1,6 +1,11 @@
 import webpush, { WebPushError } from "web-push";
 import type { Logger } from "../logger.js";
-import type { Notifier, NotifyPayload, NotifyTarget } from "./types.js";
+import {
+  PermanentDeliveryError,
+  type Notifier,
+  type NotifyPayload,
+  type NotifyTarget,
+} from "./types.js";
 
 /** VAPID identity used to sign Web Push requests (RFC 8292). */
 export interface VapidConfig {
@@ -27,13 +32,15 @@ const URGENCY_MAP: Record<NonNullable<NotifyPayload["priority"]>, "very-low" | "
  * well within the reverse swap's own timeout — while still surviving a phone that
  * is briefly unreachable.
  */
-const DEFAULT_TTL_SECONDS = 3 * 60 * 60;
+const TTL_SECONDS = 3 * 60 * 60;
 
 /**
  * Delivers a push via the standard **W3C Web Push API** — the mechanism PWAs use
  * to receive notifications through their service worker, even when the tab is
  * closed. Payloads are encrypted end-to-end (RFC 8291) and the request is signed
  * with VAPID (RFC 8292); the heavy lifting is done by the `web-push` library.
+ * VAPID details are passed per send (not via `webpush.setVapidDetails`, which
+ * mutates library-global state a second instance would clobber).
  *
  * The delivery target is the {@link WebPushSubscription} the PWA obtained from
  * `PushManager.subscribe()` and posted to `/register`. The service worker receives
@@ -41,17 +48,20 @@ const DEFAULT_TTL_SECONDS = 3 * 60 * 60;
  * `showNotification()`.
  */
 export class WebPushNotifier implements Notifier {
+  readonly targetKind = "webpush" as const;
+
   constructor(
-    vapid: VapidConfig,
+    private readonly vapid: VapidConfig,
     private readonly logger: Logger,
-    private readonly ttlSeconds: number = DEFAULT_TTL_SECONDS,
-  ) {
-    webpush.setVapidDetails(vapid.subject, vapid.publicKey, vapid.privateKey);
-  }
+  ) {}
 
   async notify(target: NotifyTarget, payload: NotifyPayload): Promise<void> {
-    const subscription = target.subscription;
-    if (!subscription) throw new Error("WebPushNotifier requires target.subscription");
+    // Unreachable through /register (it rejects mismatched kinds), but a stale
+    // persisted registration can hit this after a provider switch — permanent.
+    if (target.kind !== "webpush") {
+      throw new PermanentDeliveryError(`WebPushNotifier cannot deliver to a ${target.kind} target`);
+    }
+    const { subscription } = target;
 
     // The service worker's `push` handler reads these fields to build the
     // notification. Undefined optional fields are dropped by JSON.stringify.
@@ -65,20 +75,19 @@ export class WebPushNotifier implements Notifier {
 
     try {
       await webpush.sendNotification(subscription, data, {
-        TTL: this.ttlSeconds,
+        TTL: TTL_SECONDS,
         urgency: URGENCY_MAP[payload.priority ?? "default"],
+        vapidDetails: this.vapid,
       });
     } catch (err) {
-      // web-push surfaces the push service's HTTP status on WebPushError. 404/410
-      // mean the subscription is permanently gone (unsubscribed/expired); anything
-      // else (e.g. 429/5xx) is worth the caller's retry + sweep.
       if (err instanceof WebPushError) {
-        const gone = err.statusCode === 404 || err.statusCode === 410;
-        this.logger.warn(
-          { statusCode: err.statusCode, endpoint: subscription.endpoint, gone },
-          "web push delivery failed",
-        );
-        throw new Error(`web push failed: ${err.statusCode} ${err.body ?? ""}`.trim());
+        const message = `web push failed: ${err.statusCode} ${err.body ?? ""}`.trim();
+        // 404/410 mean the subscription is permanently gone (unsubscribed or
+        // expired) — RFC 8030 says stop sending to it; the caller prunes.
+        if (err.statusCode === 404 || err.statusCode === 410) {
+          throw new PermanentDeliveryError(message);
+        }
+        throw new Error(message);
       }
       throw err;
     }

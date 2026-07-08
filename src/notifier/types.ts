@@ -1,26 +1,31 @@
+import type { PushSubscription } from "web-push";
+
 /**
  * A W3C Push API subscription, as produced by `PushManager.subscribe()` in a
- * browser/PWA and serialized with `subscription.toJSON()`. It is the delivery
- * target for {@link WebPushNotifier}.
+ * browser/PWA and serialized with `subscription.toJSON()`. Re-exported from
+ * `web-push` so the wire shape can't drift from what the library sends to.
  */
-export interface WebPushSubscription {
-  endpoint: string;
-  /** Present on real subscriptions; browsers may set it to null. */
-  expirationTime?: number | null;
-  keys: {
-    /** The client's P-256 ECDH public key (base64url). */
-    p256dh: string;
-    /** The client's auth secret (base64url). */
-    auth: string;
-  };
-}
+export type WebPushSubscription = PushSubscription;
 
-export interface NotifyTarget {
-  /** ntfy topic, or preimage hash (hex) for GroundControl. */
-  topic?: string;
-  /** Web Push subscription (endpoint + keys) for {@link WebPushNotifier}. */
-  subscription?: WebPushSubscription;
-}
+/**
+ * Where a notification is delivered. A discriminated union so an empty or
+ * double-addressed target is unrepresentable: `topic` addresses ntfy (a topic
+ * name) and GroundControl (a preimage hash); `webpush` addresses a PWA's push
+ * subscription.
+ */
+export type NotifyTarget =
+  | { kind: "topic"; topic: string }
+  | { kind: "webpush"; subscription: WebPushSubscription };
+
+export type NotifyTargetKind = NotifyTarget["kind"];
+
+/**
+ * Delivery failed and will keep failing for this target — retrying is useless
+ * (e.g. an expired/unsubscribed Web Push subscription, or a target kind the
+ * configured provider can't address). The caller should prune the registration
+ * instead of leaving it for the retry sweep.
+ */
+export class PermanentDeliveryError extends Error {}
 
 export interface NotifyPayload {
   title: string;
@@ -40,5 +45,7 @@ export interface NotifyPayload {
  * without touching the monitor.
  */
 export interface Notifier {
+  /** The target kind this provider can deliver to; /register rejects the rest. */
+  readonly targetKind: NotifyTargetKind;
   notify(target: NotifyTarget, payload: NotifyPayload): Promise<void>;
 }
