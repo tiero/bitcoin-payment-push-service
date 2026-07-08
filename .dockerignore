@@ -1,0 +1,11 @@
+node_modules
+dist
+data
+.git
+.github
+test
+*.md
+.env
+.env.*
+!.env.example
+npm-debug.log*

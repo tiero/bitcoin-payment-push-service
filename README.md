@@ -33,9 +33,11 @@ wallet ──POST /register {swap, topic}──▶ service ── @arkade-os/bol
 - **Monitor-only.** The service runs `SwapManager` with `enableAutoActions: false`,
   so it needs **no wallet keys** — it only watches. The wallet keeps the preimage and
   claims the swap itself; the registered swap can have its `preimage` redacted.
-- **Push delivery:** pluggable `Notifier` interface; ships with
+- **Push delivery:** pluggable `Notifier` interface. Ships with
   [`ntfy.sh`](https://ntfy.sh) (no account/keys — install the app, subscribe to a
-  topic). Swap in FCM / Expo / Web-Push later.
+  topic), [BlueWallet GroundControl](https://github.com/BlueWallet/GroundControl)
+  (relays to FCM/APNs), and [Expo push](https://docs.expo.dev/push-notifications/overview/).
+  Set exactly one.
 
 ### Key modules
 
@@ -43,8 +45,8 @@ wallet ──POST /register {swap, topic}──▶ service ── @arkade-os/bol
 |------|----------------|
 | `src/swapWatcher.ts` | builds the `@arkade-os/boltz-swap` `SwapManager` (monitor-only) |
 | `src/paymentService.ts` | wires `SwapManager` events → push when claimable (via `isReverseClaimableStatus`); prunes on delivery/terminal |
-| `src/registry.ts` | persisted `swapId → {topic, swap}` map; resubscribed on restart |
-| `src/notifier/ntfyNotifier.ts` | `Notifier` implementation for ntfy.sh |
+| `src/store/` | persisted `swapId → {topic, swap}` store (JSON or SQLite); resubscribed on restart |
+| `src/notifier/` | `Notifier` implementations: ntfy, GroundControl, Expo |
 | `src/server.ts` | HTTP API |
 | `scripts/demo-receive.ts` | wallet side: creates an invoice via `ArkadeSwaps` and registers it |
 
@@ -61,7 +63,11 @@ cp .env.example .env   # defaults target the Arkade mutinynet deployment
 | `BOLTZ_API_URL` | `https://api.boltz.mutinynet.arkade.sh` | Boltz REST base; ws is derived from it |
 | `ARK_SERVER_URL` | `https://mutinynet.arkade.sh` | Arkade server (demo script only) |
 | `PORT` | `3000` | HTTP port |
-| `NTFY_BASE_URL` | `https://ntfy.sh` | push provider base URL |
+| `NTFY_BASE_URL` | `https://ntfy.sh` | push provider base URL (set exactly one provider) |
+| `GROUNDCONTROL_BASE_URL` | — | alt provider: BlueWallet GroundControl |
+| `EXPO_ENABLED` | — | alt provider: set `true` for Expo push (`EXPO_ACCESS_TOKEN` optional) |
+| `STORAGE_BACKEND` | `json` | persistence: `json` (default) or `sqlite` |
+| `DATA_FILE` | `./data/registrations.json` | where registrations persist |
 
 ## Run
 
@@ -70,6 +76,23 @@ pnpm dev      # watch mode (tsx)
 # or
 pnpm build && pnpm start
 ```
+
+## Docker
+
+A container image is published to GHCR on each release:
+
+```bash
+docker run -p 3000:3000 \
+  -e NTFY_BASE_URL=https://ntfy.sh \
+  -e STORAGE_BACKEND=sqlite \
+  -e DATA_FILE=/app/data/registrations.db \
+  -v bps-data:/app/data \
+  ghcr.io/tiero/bitcoin-payment-push-service:latest
+```
+
+Multi-arch (`linux/amd64`, `linux/arm64`), runs as a non-root user, persists registrations
+under the `/app/data` volume, and ships a `HEALTHCHECK` on `/health`. Build locally with
+`docker build -t bitcoin-payment-push-service .`.
 
 ## HTTP API
 
@@ -112,7 +135,8 @@ pnpm build && pnpm start
 pnpm test
 ```
 
-- `test/registry.test.ts` — registration persistence/reload and no-op write skipping.
+- `test/store.test.ts` — the `RegistrationStore` contract (persistence/reload, no-op write
+  skipping) run against **both** the JSON and SQLite backends.
 - `test/paymentFlow.test.ts` — a **component test that drives the real
   `@arkade-os/boltz-swap` `SwapManager`** with a mocked `globalThis.WebSocket`,
   feeding mocked Boltz `swap.update` events through the whole pipeline: register →
@@ -133,14 +157,15 @@ pnpm test
 - **Bounded state.** A delivered swap, or one that reaches a terminal state
   (settled/failed/expired) without us pushing, is pruned from both the registry and
   the manager, so the persisted store stays small.
-- **Crash-safe persistence.** The registry writes to a temp file then `rename()`s,
-  so a crash mid-write can't corrupt `registrations.json`.
+- **Crash-safe persistence.** The default JSON store writes to a temp file then
+  `rename()`s, so a crash mid-write can't corrupt `registrations.json`; set
+  `STORAGE_BACKEND=sqlite` for a WAL-mode SQLite store instead.
 
 ## Notes & extension points
 
 - Because monitoring needs no keys, the wallet can **redact the `preimage`** before
   registering — the secret never leaves the wallet. The demo does this.
-- Add an `FcmNotifier` / `ExpoNotifier` / Web-Push behind the `Notifier` interface
-  without touching the monitor.
+- ntfy, GroundControl, and Expo notifiers ship today; add FCM / Web-Push behind the
+  same `Notifier` interface without touching the monitor.
 - For a non-Boltz / wallet-wide path, the same idea maps onto the arkd indexer stream
   (`@arkade-os/sdk` `waitForIncomingFunds` / `SubscribeForScripts`); out of scope here.

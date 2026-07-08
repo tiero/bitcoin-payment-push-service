@@ -7,12 +7,12 @@ import {
   type SwapManagerClient,
 } from "@arkade-os/boltz-swap";
 import type { Logger } from "./logger.js";
-import type { Registry, Registration } from "./registry.js";
+import type { Registration, RegistrationStore } from "./store/index.js";
 import type { Notifier } from "./notifier/types.js";
 
 export interface PaymentServiceDeps {
   manager: SwapManagerClient;
-  registry: Registry;
+  registry: RegistrationStore;
   notifier: Notifier;
   logger: Logger;
   /** How often to retry delivery for claimable-but-undelivered swaps. Default 60s. */

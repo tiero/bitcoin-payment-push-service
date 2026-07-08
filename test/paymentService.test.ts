@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SwapManagerClient } from "@arkade-os/boltz-swap";
-import { Registry } from "../src/registry.js";
+import { JsonStore } from "../src/store/index.js";
 import { attachPaymentNotifications, type PaymentService } from "../src/paymentService.js";
 import type { Notifier, NotifyPayload, NotifyTarget } from "../src/notifier/types.js";
 import { flush, mockReverseSwap, silentLogger } from "./helpers.js";
@@ -21,7 +21,7 @@ function fakeManager(removeSwap = vi.fn(async () => {})): SwapManagerClient {
 describe("attachPaymentNotifications", () => {
   let dir: string;
   let payments: PaymentService;
-  let registry: Registry;
+  let registry: JsonStore;
   let notify: ReturnType<typeof vi.fn>;
   let notifier: Notifier;
   let removeSwap: ReturnType<typeof vi.fn>;
@@ -35,7 +35,7 @@ describe("attachPaymentNotifications", () => {
     opts: { sweepIntervalMs?: number; deliveryAttempts?: number } = {},
   ): Promise<void> {
     dir = mkdtempSync(join(tmpdir(), "pay-"));
-    registry = new Registry(join(dir, "reg.json"), silentLogger);
+    registry = new JsonStore(join(dir, "reg.json"), silentLogger);
     removeSwap = vi.fn(async () => {});
     notify = vi.fn(async () => {});
     notifier = { notify } as unknown as Notifier;
@@ -83,7 +83,7 @@ describe("attachPaymentNotifications", () => {
 
   it("retries inline before leaving the swap registered for the sweep", async () => {
     dir = mkdtempSync(join(tmpdir(), "pay-"));
-    registry = new Registry(join(dir, "reg.json"), silentLogger);
+    registry = new JsonStore(join(dir, "reg.json"), silentLogger);
     removeSwap = vi.fn(async () => {});
     let attempts = 0;
     notify = vi.fn(async () => {
@@ -147,7 +147,7 @@ describe("attachPaymentNotifications", () => {
 
   it("does not start a second delivery while the first is still in flight", async () => {
     dir = mkdtempSync(join(tmpdir(), "pay-"));
-    registry = new Registry(join(dir, "reg.json"), silentLogger);
+    registry = new JsonStore(join(dir, "reg.json"), silentLogger);
     removeSwap = vi.fn(async () => {});
     let unblock!: () => void;
     const gate = new Promise<void>((resolve) => {

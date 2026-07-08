@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import { z } from "zod";
 import type { BoltzReverseSwap, BoltzSwapStatus, SwapManagerClient } from "@arkade-os/boltz-swap";
 import type { Logger } from "./logger.js";
-import type { Registry } from "./registry.js";
+import type { RegistrationStore } from "./store/index.js";
 
 /**
  * A reverse swap as handed over by the wallet. Validated loosely: we only require
@@ -28,7 +28,7 @@ const registerSchema = z.object({
 });
 
 export interface ServerDeps {
-  registry: Registry;
+  registry: RegistrationStore;
   manager: SwapManagerClient;
   /** Inject a synthetic swap update through the same pipeline (for manual testing). */
   simulate: (swap: BoltzReverseSwap, oldStatus: BoltzSwapStatus) => void;

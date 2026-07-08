@@ -1,39 +1,16 @@
 import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import type { BoltzReverseSwap, BoltzSwapStatus } from "@arkade-os/boltz-swap";
-import type { Logger } from "./logger.js";
-
-export interface Registration {
-  swapId: string;
-  /** ntfy topic, or preimage hash when using GroundControl. */
-  topic: string;
-  label?: string;
-  /**
-   * The pending reverse swap as supplied by the wallet at registration time.
-   * `swap.status` is the single source of truth for the swap's state. Re-fed to
-   * the SwapManager on restart so monitoring resumes. The wallet may redact
-   * `preimage` (the service never claims), keeping the secret off this box.
-   */
-  swap: BoltzReverseSwap;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface RegisterInput {
-  topic: string;
-  label?: string;
-  swap: BoltzReverseSwap;
-}
+import type { BoltzSwapStatus } from "@arkade-os/boltz-swap";
+import type { Logger } from "../logger.js";
+import type { Registration, RegisterInput, RegistrationStore } from "./types.js";
 
 /**
- * Stores swap-id -> registration mappings, persisted to a JSON file so that
- * registrations survive restarts and can be re-subscribed on boot.
- *
- * Lifecycle is prune-on-terminal: a registration is removed once its payment is
- * delivered or the swap fails, so the file stays bounded. Writes are atomic
- * (temp file + rename) so a crash mid-write cannot corrupt the store.
+ * {@link RegistrationStore} backed by a single JSON file, kept in memory and
+ * rewritten on each change. Writes are atomic (temp file + rename) so a crash
+ * mid-write cannot corrupt the store; the file stays small because registrations
+ * are pruned once their payment is delivered or the swap fails.
  */
-export class Registry {
+export class JsonStore implements RegistrationStore {
   private readonly byId = new Map<string, Registration>();
 
   constructor(
@@ -91,12 +68,10 @@ export class Registry {
     return removed;
   }
 
-  /** All registrations (the swaps still being monitored). */
   all(): Registration[] {
     return [...this.byId.values()];
   }
 
-  /** Record a new swap status. No-ops (and skips the disk write) if unchanged. */
   markStatus(swapId: string, status: BoltzSwapStatus): Registration | undefined {
     const reg = this.byId.get(swapId);
     if (!reg) return undefined;
@@ -105,5 +80,9 @@ export class Registry {
     reg.updatedAt = Date.now();
     this.persist();
     return reg;
+  }
+
+  close(): void {
+    // Nothing to release: every mutation is persisted synchronously.
   }
 }
